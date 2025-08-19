@@ -5,7 +5,7 @@ A modern real-time **chat & social app** built with **Flutter** and **Supabase**
 ---
 
 ## View live Demo
-https://drive.google.com/file/d/1q9X8iNnkzok5QWZPmNVbPlOCv2uxCS7E/view?usp=sharing
+https://drive.google.com/file/d/1rStmAzqX9XebmQw6Qa5b6Eva5E_xZPq6/view?usp=sharing
 
 ---
 
