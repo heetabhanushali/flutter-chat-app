@@ -18,7 +18,9 @@ https://drive.google.com/file/d/1q9X8iNnkzok5QWZPmNVbPlOCv2uxCS7E/view?usp=shari
 **Authentication**
 - Login & Registration using **email and password**.  
 - Login with either **email or username**.
-- Checks if username is **unique**   
+- Checks if username is **unique**
+- Username can only contain letters and numbers and _ and .
+- **Comfirm password** when registering   
 
 **AI Chat**
 - Integrated **Gemini AI** page to chat with an AI assistant.  
