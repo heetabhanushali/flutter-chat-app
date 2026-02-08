@@ -5,6 +5,7 @@ import 'package:chat_app/screens/personal_chat.dart';
 import 'package:chat_app/widgets/conversation_tile.dart';
 import 'package:chat_app/models/models.dart';
 import 'package:chat_app/services/chat_service.dart';
+import 'package:chat_app/services/realtime_service.dart';
 
 
 class ChatList extends StatefulWidget {
@@ -21,6 +22,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   String? error;
   RealtimeChannel? _conversationsSubscription;
   final ChatService _chatService = ChatService();
+  final RealtimeService _realtimeService = RealtimeService();
 
   @override
   void initState() {
@@ -65,7 +67,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
           id: conv['id'],
           otherUser: UserProfile.fromJson(conv['otherUser']),
           lastMessage: conv['lastMessage'],
-          updatedAt: DateTime.parse(conv['updatedAt']),
+          updatedAt: DateTime.parse(conv['updatedAt'] + 'Z').toLocal(),
           isUnread: isUnread,
         ));
       }
@@ -88,141 +90,54 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   }
 
   void _setupRealtimeSubscription() {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
+    if (_chatService.currentUserId == null) return;
 
-    _conversationsSubscription = supabase
-        .channel('chat_updates_$currentUserId')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'conversations',
-          callback: (payload) {
-            loadConversations();
+    _conversationsSubscription = _realtimeService.subscribeToConversationList(
+      onConversationChange: () {
+        loadConversations();
+      },
+      onConversationDeleted: (conversationId) {
+        if (mounted) {
+          setState(() {
+            conversations.removeWhere((c) => c.id == conversationId);
+          });
+        }
+      },
+      onNewMessage: (messageData) async {
+        final senderId = messageData['sender_id'];
+        final conversationId = messageData['conversation_id'];
+        
+        // Check if conversation already exists in list
+        final existingIndex = conversations.indexWhere((c) => c.id == conversationId);
+
+        if (existingIndex == -1) {
+          // New conversation - process and add
+          final convData = await _realtimeService.processNewMessageForConversationList(messageData);
+          
+          if (convData != null && mounted) {
+            final isUnread = senderId != _chatService.currentUserId;
+            setState(() {
+              conversations.insert(
+                0,
+                ConversationWithUser(
+                  id: convData['id'],
+                  otherUser: UserProfile.fromJson(convData['otherUser']),
+                  lastMessage: convData['lastMessage'],
+                  updatedAt: DateTime.parse(convData['updatedAt'] + 'Z').toLocal(),
+                  isUnread: isUnread,
+                ),
+              );
+            });
           }
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert, 
-          schema: 'public',
-          table: 'user_deleted_conversations',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'user_id',
-            value: currentUserId,
-          ),
-          callback: (payload) {
-            final deletedConversationId = payload.newRecord['conversation_id'];
-            if (deletedConversationId != null) {
-              setState(() {
-                conversations.removeWhere((c) => c.id == deletedConversationId);
-              });
-            }
-          }
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'messages',
-          callback: (payload) async {
-            final newRecord = payload.newRecord;
-            final conversationId = newRecord['conversation_id'];
-            final senderId = newRecord['sender_id'];
-            if (conversationId == null) return;
-
-            // Check if this conversation involves the current user
-            final conversationCheck = await supabase
-                .from('conversations')
-                .select('id, participant1_id, participant2_id')
-                .eq('id', conversationId)
-                .maybeSingle();
-                
-            if (conversationCheck == null) return;
-
-            final p1 = conversationCheck['participant1_id'];
-            final p2 = conversationCheck['participant2_id'];
-            if (p1 != currentUserId && p2 != currentUserId) return;
-
-            // Check if conversation was previously deleted by user
-            final deletionResponse = await supabase
-                .from('user_deleted_conversations')
-                .select('deleted_at')
-                .eq('user_id', currentUserId)
-                .eq('conversation_id', conversationId)
-                .maybeSingle();
-
-            bool shouldShowConversation = true;
-            
-            if (deletionResponse != null) {
-              final deletedAtUtc = DateTime.parse(deletionResponse['deleted_at']).toUtc();
-              final messageTimeUtc = DateTime.parse(newRecord['created_at']).toUtc();
-              
-              // Only show if message is after deletion time
-              shouldShowConversation = messageTimeUtc.isAfter(deletedAtUtc);
-            }
-
-            if (!shouldShowConversation) return;
-
-            // Check if conversation already exists in list
-            final existingIndex = conversations.indexWhere((c) => c.id == conversationId);
-            
-            if (existingIndex == -1) {
-              // Add new conversation to the list
-              final newConv = await supabase
-                  .from('conversations')
-                  .select('''
-                    id,
-                    participant1_id,
-                    participant2_id,
-                    last_message,
-                    updated_at,
-                    participant1:participant1_id(id, username, avatar_url),
-                    participant2:participant2_id(id, username, avatar_url)
-                  ''')
-                  .eq('id', conversationId)
-                  .maybeSingle();
-              
-              if (newConv != null) {
-                final otherUser = (newConv['participant1_id'] == currentUserId)
-                    ? newConv['participant2']
-                    : newConv['participant1'];
-
-                
-                if (otherUser != null && mounted) {
-                  final isUnread = senderId != currentUserId;
-                  setState(() {
-                    conversations.insert(
-                      0,
-                      ConversationWithUser(
-                        id: newConv['id'], 
-                        otherUser: UserProfile.fromJson(otherUser), 
-                        lastMessage: newConv['last_message'] ?? '', 
-                        updatedAt: DateTime.parse(newConv['updated_at']),
-                        isUnread: isUnread,
-                      )
-                    );
-                  });
-                }
-              }
-            } else {
-              // Update existing conversation (move to top and update last message)
-              loadConversations();
-            }
-          },
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public', 
-          table: 'message_read_status',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq, 
-            column: 'user_id', 
-            value: currentUserId,
-          ),
-          callback: (payload){
-            loadConversations();
-          }
-        )
-        .subscribe();
+        } else {
+          // Existing conversation - reload to update
+          loadConversations();
+        }
+      },
+      onReadStatusChange: () {
+        loadConversations();
+      },
+    );
   }
 
   Future<void> _refreshConversations() async {

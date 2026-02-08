@@ -17,7 +17,7 @@ class ConversationTile extends StatelessWidget {
   });
 
   String _formatTimestamp(DateTime timestamp) {
-    final now = DateTime.now();
+    final now = DateTime.now(); 
     final difference = now.difference(timestamp);
 
     if (difference.inDays > 0) {

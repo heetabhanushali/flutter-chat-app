@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/services/chat_service.dart';
 import 'package:chat_app/services/user_service.dart';
 import 'package:chat_app/widgets/message_bubble.dart';
+import 'package:chat_app/services/realtime_service.dart';
 
 final supabase = Supabase.instance.client;
 
@@ -36,6 +37,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   DateTime? _deletionCutoffTime; 
   final ChatService _chatService = ChatService();
   final UserService _userService = UserService();
+  final RealtimeService _realtimeService = RealtimeService();
 
   @override
   void initState() {
@@ -49,15 +51,14 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   void didUpdateWidget(PersonalChatMessages oldWidget) {
     super.didUpdateWidget(oldWidget);
     
-    // Only reload if conversation ID changed
     if (oldWidget.conversationId != widget.conversationId) {
       _currentConversationId = widget.conversationId;
       _hasLoadedOnce = false;
       _deletionCutoffTime = null;
       _messages.clear();
-      _messageReadStatusCache.clear(); // Clear the cache
-      _messageSubscription?.unsubscribe();
-      _readStatusSubscription?.unsubscribe();
+      _messageReadStatusCache.clear();
+      _realtimeService.unsubscribe(_messageSubscription);
+      _realtimeService.unsubscribe(_readStatusSubscription);
       _loadMessages();
       _setupRealtimeSubscription();
     }
@@ -66,8 +67,8 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   @override
   void dispose() {
     _scrollController.dispose();
-    _messageSubscription?.unsubscribe();
-    _readStatusSubscription?.unsubscribe();
+    _realtimeService.unsubscribe(_messageSubscription);
+    _realtimeService.unsubscribe(_readStatusSubscription);
     super.dispose();
   }
 
@@ -312,69 +313,41 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     if (_currentConversationId == null) return;
 
     // Clean up existing subscriptions
-    _messageSubscription?.unsubscribe();
-    _readStatusSubscription?.unsubscribe();
+    _realtimeService.unsubscribe(_messageSubscription);
+    _realtimeService.unsubscribe(_readStatusSubscription);
 
     // Subscribe to new messages
-    _messageSubscription = supabase
-        .channel('messages_${_currentConversationId}_${DateTime.now().millisecondsSinceEpoch}')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'messages',
-          filter: PostgresChangeFilter(
-            type: PostgresChangeFilterType.eq,
-            column: 'conversation_id',
-            value: _currentConversationId!,
-          ),
-          callback: (payload) {
-            final newMessage = payload.newRecord;
-            if (mounted) {
-              _addNewMessage(newMessage);
-            }
-          },
-        )
-        .subscribe((status, error) {
-          if (error != null) {
-            print('Message subscription error: $error');
-          }
-        });
+    _messageSubscription = _realtimeService.subscribeToMessages(
+      conversationId: _currentConversationId!,
+      onNewMessage: (messageData) {
+        if (mounted) {
+          _addNewMessage(messageData);
+        }
+      },
+      onError: (error) {
+        print('Message subscription error: $error');
+      },
+    );
 
     // Subscribe to read status changes
-    _readStatusSubscription = supabase
-        .channel('read_status_${_currentConversationId}_${DateTime.now().millisecondsSinceEpoch}')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'message_read_status',
-          callback: (payload) {
-            final newReadStatus = payload.newRecord;
-            final messageId = newReadStatus['message_id'];
-            final userId = newReadStatus['user_id'];
-            final readAt = newReadStatus['read_at'];
-            
-            if (mounted && messageId != null && userId != null && readAt != null) {
-              // Check if this read status is for a message in our current conversation
-              // and if the user who read it is the recipient
-              final recipientId = widget.recipientUser['id'];
-              final messageExists = _messages.any((msg) => msg['id'] == messageId);
-              
-              if (messageExists && userId == recipientId) {
-                // Update cache with the read timestamp
-                _messageReadStatusCache[messageId] = DateTime.parse(readAt).toLocal();
-                
-                setState(() {
-                  // This will cause the message status widgets to rebuild
-                });
-              }
-            }
-          },
-        )
-        .subscribe((status, error) {
-          if (error != null) {
-            print('Read status subscription error: $error');
+    final recipientId = widget.recipientUser['id'];
+    if (recipientId != null) {
+      _readStatusSubscription = _realtimeService.subscribeToReadStatus(
+        recipientId: recipientId,
+        onMessageRead: (messageId, readAt) {
+          if (mounted) {
+            _messageReadStatusCache[messageId] = readAt;
+            setState(() {});
           }
-        });
+        },
+        messageExistsCheck: (messageId) {
+          return _messages.any((msg) => msg['id'] == messageId);
+        },
+        onError: (error) {
+          print('Read status subscription error: $error');
+        },
+      );
+    }
   }
 
   void _addNewMessage(Map<String, dynamic> messageData) async {
