@@ -3,6 +3,22 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 class UserService {
   final SupabaseClient _supabase = Supabase.instance.client;
 
+  // ─── Get User Info (for messages) ───────────────────────────
+  Future<Map<String, dynamic>> getUserInfo(String userId) async {
+    try {
+      final response = await _supabase
+          .from('users')
+          .select('username, avatar_url')
+          .eq('id', userId)
+          .single();
+
+      return response;
+    } catch (e) {
+      print('Error fetching user info: $e');
+      return {'username': 'Unknown', 'avatar_url': null};
+    }
+  }
+
   // ─── Get User Data by ID ──────────────────────────────────
 
   /// Returns user row from the `users` table for a given user ID

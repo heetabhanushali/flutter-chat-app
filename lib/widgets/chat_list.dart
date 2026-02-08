@@ -4,6 +4,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/screens/personal_chat.dart';
 import 'package:chat_app/widgets/conversation_tile.dart';
 import 'package:chat_app/models/models.dart';
+import 'package:chat_app/services/chat_service.dart';
+
 
 class ChatList extends StatefulWidget {
   const ChatList({super.key});
@@ -18,6 +20,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   bool isLoading = true;
   String? error;
   RealtimeChannel? _conversationsSubscription;
+  final ChatService _chatService = ChatService();
 
   @override
   void initState() {
@@ -46,86 +49,25 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
 
   Future<void> loadConversations() async {
     try {
-      final currentUserId = supabase.auth.currentUser?.id;
-      if (currentUserId == null) return;
+      if (_chatService.currentUserId == null) return;
 
-      // Get all deleted conversations for current user
-      final deletedConversationsResponse = await supabase
-        .from('user_deleted_conversations')
-        .select('conversation_id, deleted_at')
-        .eq('user_id', currentUserId);
-
-      final Map<String, DateTime> deletedConversations = {};
-      for (final deleted in deletedConversationsResponse) {
-        deletedConversations[deleted['conversation_id']] = 
-          DateTime.parse(deleted['deleted_at']).toUtc();
-      }
-
-      // Get all conversations where user is a participant
-      final response = await supabase
-          .from('conversations')
-          .select('''
-            *,
-            participant1:users!participant1_id(id, username, avatar_url),
-            participant2:users!participant2_id(id, username, avatar_url)
-          ''')
-          .or('participant1_id.eq.$currentUserId,participant2_id.eq.$currentUserId')
-          .order('updated_at', ascending: false);
+      // Get all conversations from service
+      final conversationsData = await _chatService.loadConversations();
 
       if (!mounted) return;
 
       final newConversations = <ConversationWithUser>[];
 
-      for (final conv in response) {
-        final conversationId = conv['id'];
-        
-        if (deletedConversations.containsKey(conversationId)) {
-          final deletedAtUtc = deletedConversations[conversationId]!;
-          
-          // Check if there are any messages after the deletion time
-          final messagesAfterDeletion = await supabase
-              .from('messages')
-              .select('id, created_at')
-              .eq('conversation_id', conversationId)
-              .order('created_at', ascending: false)
-              .limit(5);
-          
-          // Filter messages that are after deletion time
-          final validMessages = messagesAfterDeletion.where((msg) {
-            final msgTime = DateTime.parse(msg['created_at'] + 'Z').toUtc();
-            return msgTime.isAfter(deletedAtUtc);
-          }).toList();
-          
-          // Only include if there are messages after deletion
-          if (validMessages.isNotEmpty) {
-            final isParticipant1 = conv['participant1_id'] == currentUserId;
-            final otherUser = isParticipant1 ? conv['participant2'] : conv['participant1'];
-            
-            final isUnread = await _isConversationUnread(conv['id'], currentUserId);
+      for (final conv in conversationsData) {
+        final isUnread = await _chatService.isConversationUnread(conv['id']);
 
-            newConversations.add(ConversationWithUser(
-              id: conv['id'],
-              otherUser: UserProfile.fromJson(otherUser),
-              lastMessage: conv['last_message'] ?? '',
-              updatedAt: DateTime.parse(conv['updated_at']),
-              isUnread: isUnread,
-            ));
-          } 
-        } else {
-          // Conversation not deleted, include it
-          final isParticipant1 = conv['participant1_id'] == currentUserId;
-          final otherUser = isParticipant1 ? conv['participant2'] : conv['participant1'];
-          
-          final isUnread = await _isConversationUnread(conv['id'], currentUserId);
-
-          newConversations.add(ConversationWithUser(
-            id: conv['id'],
-            otherUser: UserProfile.fromJson(otherUser),
-            lastMessage: conv['last_message'] ?? '',
-            updatedAt: DateTime.parse(conv['updated_at']),
-            isUnread: isUnread,
-          ));
-        }
+        newConversations.add(ConversationWithUser(
+          id: conv['id'],
+          otherUser: UserProfile.fromJson(conv['otherUser']),
+          lastMessage: conv['lastMessage'],
+          updatedAt: DateTime.parse(conv['updatedAt']),
+          isUnread: isUnread,
+        ));
       }
 
       setState(() {
@@ -283,66 +225,14 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         .subscribe();
   }
 
-  Future<bool> _isConversationUnread(String conversationId, String currentUserId) async {
-    try {
-      // Get the latest message in this conversation
-      final latestMessage = await supabase
-          .from('messages')
-          .select('id, sender_id, created_at')
-          .eq('conversation_id', conversationId)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
-
-      if (latestMessage == null) return false;
-      
-      // If current user sent the latest message, it's not unread for them
-      if (latestMessage['sender_id'] == currentUserId) return false;
-
-      // Check if current user has read this message
-      final readStatus = await supabase
-          .from('message_read_status')
-          .select('id')
-          .eq('message_id', latestMessage['id'])
-          .eq('user_id', currentUserId)
-          .maybeSingle();
-
-      // If no read status exists, the message is unread
-      return readStatus == null;
-    } catch (e) {
-      print('Error checking read status: $e');
-      return false;
-    }
-  }
-
   Future<void> _refreshConversations() async {
     await loadConversations();
   }
 
   Future<void> _deleteConversationForUser(String conversationId) async {
     try {
-      final currentUserId = supabase.auth.currentUser?.id;
-      if (currentUserId == null){
-        return;
-      }
+      await _chatService.deleteConversationForUser(conversationId);
 
-      await supabase
-          .from('user_deleted_conversations')
-          .delete()
-          .eq('user_id', currentUserId)
-          .eq('conversation_id', conversationId);
-
-      final deletionTime = DateTime.now().toUtc().toIso8601String();
-
-      await supabase
-          .from('user_deleted_conversations')
-          .insert({
-            'user_id': currentUserId,
-            'conversation_id': conversationId,
-            'deleted_at': deletionTime,
-          });
-
-      // Show confirmation
       if (mounted) {
         setState(() {
           conversations.removeWhere((c) => c.id == conversationId);
@@ -512,6 +402,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
                 );
                 if (mounted) loadConversations();
               },
+              onDelete: () {},
             ),
           );
         },

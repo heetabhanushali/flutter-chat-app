@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/models/models.dart';
+import 'package:chat_app/services/chat_service.dart';
 
 class ConversationTile extends StatelessWidget {
   final ConversationWithUser conversation;
   final VoidCallback? onTap;
   final VoidCallback? onDelete;
 
-  const ConversationTile({
+  final ChatService _chatService = ChatService();
+
+  ConversationTile({
     super.key,
     required this.conversation,
     this.onTap,
@@ -30,79 +32,20 @@ class ConversationTile extends StatelessWidget {
   }
 
   Future<void> _markConversationAsRead() async {
-    if (!conversation.isUnread) return; // Already read, no need to update
-    
+    if (!conversation.isUnread) return;
     try {
-      final supabase = Supabase.instance.client;
-      final currentUserId = supabase.auth.currentUser?.id;
-      
-      if (currentUserId == null) return;
-
-      // Get the latest message in this conversation
-      final latestMessage = await supabase
-          .from('messages')
-          .select('id, sender_id')
-          .eq('conversation_id', conversation.id)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
-
-      if (latestMessage == null || latestMessage['sender_id'] == currentUserId) {
-        return; // No message or user sent the latest message
-      }
-
-      // Check if already marked as read
-      final existingRead = await supabase
-          .from('message_read_status')
-          .select('id')
-          .eq('message_id', latestMessage['id'])
-          .eq('user_id', currentUserId)
-          .maybeSingle();
-
-      // Only insert if not already marked as read
-      if (existingRead == null) {
-        await supabase
-            .from('message_read_status')
-            .insert({
-              'message_id': latestMessage['id'],
-              'user_id': currentUserId,
-            });
-      }
+      await _chatService.markConversationAsRead(conversation.id);
     } catch (e) {
       print('Error marking conversation as read: $e');
     }
   }
 
-  Future<void> _deleteConversationForUser(BuildContext context) async {
+  Future<void> _deleteConversationForUser() async {
     try {
-      final supabase = Supabase.instance.client;
-      final currentUserId = supabase.auth.currentUser?.id;
-      
-      if (currentUserId == null) {
-        throw Exception('User not authenticated');
-      }
-
-      await supabase.from('user_deleted_conversations').insert({
-        'user_id': currentUserId,
-        'conversation_id': conversation.id,
-        'deleted_at': DateTime.now().toIso8601String(),
-      });
-      
+      await _chatService.deleteConversationForUser(conversation.id);      
       onDelete?.call();
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Conversation deleted'),
-          duration: Duration(seconds: 2),
-        ),
-      );
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error deleting conversation: $e'),
-          backgroundColor: Theme.of(context).colorScheme.error,
-        ),
-      );
+      print('Error deleting conversation: $e');
     }
   }
 
@@ -153,7 +96,7 @@ class ConversationTile extends StatelessWidget {
               ),
               onPressed: () {
                 Navigator.of(context).pop();
-                _deleteConversationForUser(context);
+                _deleteConversationForUser();
               },
             ),
           ],

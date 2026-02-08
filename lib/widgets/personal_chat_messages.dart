@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/chat_service.dart';
+import 'package:chat_app/services/user_service.dart';
+import 'package:chat_app/widgets/message_bubble.dart';
 
 final supabase = Supabase.instance.client;
 
@@ -30,7 +33,9 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   // Add these for better state management
   String? _currentConversationId;
   bool _hasLoadedOnce = false;
-  DateTime? _deletionCutoffTime; // Cache the deletion time
+  DateTime? _deletionCutoffTime; 
+  final ChatService _chatService = ChatService();
+  final UserService _userService = UserService();
 
   @override
   void initState() {
@@ -67,66 +72,40 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   }
 
   Future<DateTime?> _getConversationDeletionTime() async {
-    // Return cached value if available
     if (_deletionCutoffTime != null) {
       return _deletionCutoffTime;
     }
 
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null || _currentConversationId == null) return null;
+    if (_currentConversationId == null) return null;
 
-    try {
-      final deletionResponse = await supabase
-          .from('user_deleted_conversations')
-          .select('deleted_at')
-          .eq('user_id', currentUserId)
-          .eq('conversation_id', _currentConversationId!)
-          .maybeSingle();
-
-      if (deletionResponse != null) {
-        _deletionCutoffTime = DateTime.parse(deletionResponse['deleted_at']).toUtc();
-        return _deletionCutoffTime;
-      }
-      
-      return null;
+    try{
+      _deletionCutoffTime = await _chatService.getConversationDeletionTime(_currentConversationId!);
+      return _deletionCutoffTime;
     } catch (e) {
+      print('Error getting conversation deletion time: $e');
       return null;
     }
   }
 
   Future<DateTime?> _getMessageReadTime(String messageId, String senderId) async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return null;
-
-    // Only check read status for messages I sent
-    if (senderId != currentUserId) return null;
-
     // Check cache first
     if (_messageReadStatusCache.containsKey(messageId)) {
       return _messageReadStatusCache[messageId];
     }
 
     try {
-      // Get the recipient's user ID from the widget
       final recipientId = widget.recipientUser['id'];
       if (recipientId == null) return null;
 
-      // Check if the recipient has read this message and get the read_at timestamp
-      final readStatus = await supabase
-          .from('message_read_status')
-          .select('read_at')
-          .eq('message_id', messageId)
-          .eq('user_id', recipientId)
-          .maybeSingle();
+      final readTime = await _chatService.getMessageReadTime(
+        messageId,
+        senderId,
+        recipientId,
+      );
 
-      DateTime? readTime;
-      if (readStatus != null) {
-        readTime = DateTime.parse(readStatus['read_at']).toLocal();
-      }
-      
       // Cache the result
       _messageReadStatusCache[messageId] = readTime;
-      
+
       return readTime;
     } catch (e) {
       print('Error checking message read status: $e');
@@ -272,67 +251,18 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   }
 
   Future<void> _markMessageAsRead(String messageId, String senderId) async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null || senderId == currentUserId) return;
-
     try {
-      // Check if already marked as read
-      final existingRead = await supabase
-          .from('message_read_status')
-          .select('id')
-          .eq('message_id', messageId)
-          .eq('user_id', currentUserId)
-          .maybeSingle();
-
-      // Only insert if not already marked as read
-      if (existingRead == null) {
-        await supabase
-            .from('message_read_status')
-            .insert({
-              'message_id': messageId,
-              'user_id': currentUserId,
-            });
-      }
+      await _chatService.markMessageAsRead(messageId, senderId);
     } catch (e) {
       print('Error marking message as read: $e');
     }
   }
 
   Future<void> markAllExistingMessagesAsRead() async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null || _currentConversationId == null) return;
+    if (_currentConversationId == null) return;
 
     try {
-      // Get all messages in this conversation that were sent by the other user
-      final unreadMessages = _messages.where((msg) => 
-        msg['sender_id'] != currentUserId
-      ).toList();
-
-      if (unreadMessages.isEmpty) return;
-
-      // Check which messages are already marked as read
-      final messageIds = unreadMessages.map((msg) => msg['id']).toList();
-      final existingReadStatus = await supabase
-          .from('message_read_status')
-          .select('message_id')
-          .eq('user_id', currentUserId)
-          .inFilter('message_id', messageIds);
-
-      final alreadyReadIds = existingReadStatus.map((status) => status['message_id']).toSet();
-
-      // Only insert read status for messages that aren't already marked as read
-      final readStatusInserts = unreadMessages
-          .where((msg) => !alreadyReadIds.contains(msg['id']))
-          .map((msg) => {
-            'message_id': msg['id'],
-            'user_id': currentUserId,
-          }).toList();
-
-      if (readStatusInserts.isNotEmpty) {
-        await supabase
-            .from('message_read_status')
-            .insert(readStatusInserts);
-      }
+      await _chatService.markAllMessagesAsRead(_currentConversationId!);
     } catch (e) {
       print('Error marking existing messages as read: $e');
     }
@@ -348,37 +278,21 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
         _error = null;
       });
 
-      final currentUserId = supabase.auth.currentUser?.id;
-      if (currentUserId == null) throw Exception('User not authenticated');
+      // Load messages from service
+      final messages = await _chatService.loadMessages(_currentConversationId!);
 
-      // Get deletion cutoff time
-      final deletedAt = await _getConversationDeletionTime();
-
-      final messages = await supabase
-          .from('messages')
-          .select('*, sender:users!messages_sender_id_fkey(username, avatar_url)')
-          .eq('conversation_id', _currentConversationId!)
-          .order('created_at', ascending: true);
-
-      // Filter messages based on deletion time
-      final filteredMessages = deletedAt != null 
-        ? messages.where((msg) {
-          final msgTimeUtc = DateTime.parse(msg['created_at'] + 'Z').toUtc();
-          final isAfterDeletion = msgTimeUtc.isAfter(deletedAt);
-          return isAfterDeletion;
-        }).toList()
-        : messages;
+      // Cache deletion time for later use
+      _deletionCutoffTime = await _chatService.getConversationDeletionTime(_currentConversationId!);
 
       if (mounted && _currentConversationId == widget.conversationId) {
         setState(() {
-          _messages = List<Map<String, dynamic>>.from(filteredMessages);
+          _messages = messages;
           _isLoading = false;
           _hasLoadedOnce = true;
         });
 
-        // Only scroll to bottom on initial load or if user was already at bottom
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollController.hasClients && filteredMessages.isNotEmpty) {
+          if (_scrollController.hasClients && messages.isNotEmpty) {
             _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
           }
           markAllExistingMessagesAsRead();
@@ -464,7 +378,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   }
 
   void _addNewMessage(Map<String, dynamic> messageData) async {
-    final currentUserId = supabase.auth.currentUser?.id;
+    final currentUserId = _chatService.currentUserId;
     
     // Check if message already exists (prevent duplicates)
     final messageExists = _messages.any((msg) => msg['id'] == messageData['id']);
@@ -475,12 +389,21 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     // Check against deletion cutoff time
     final deletedAt = await _getConversationDeletionTime();
     if (deletedAt != null) {
-      final messageTimeUtc = DateTime.parse(messageData['created_at'] + 'Z').toUtc();
+      final rawTime = messageData['created_at'];
+      DateTime messageTimeUtc;
+      
+      if (rawTime.toString().endsWith('Z') || rawTime.toString().contains('+')) {
+        messageTimeUtc = DateTime.parse(rawTime);
+      } else {
+        messageTimeUtc = DateTime.parse(rawTime + 'Z').toUtc();
+      }
+      
       if (messageTimeUtc.isBefore(deletedAt) || messageTimeUtc.isAtSameMomentAs(deletedAt)) {
         return;
       }
     }
 
+    // Replace optimistic message with real message
     if (messageData['sender_id'] == currentUserId) {
       final tempMessageExists = _messages.any((msg) => 
         msg['sender_id'] == currentUserId && 
@@ -498,7 +421,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
           if (index != -1) {
             _messages[index] = {
               ...messageData,
-              'sender': _messages[index]['sender'], // Keep existing sender info
+              'sender': _messages[index]['sender'],
             };
           }
         });
@@ -507,12 +430,8 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     }
 
     try {
-      // Fetch sender info for the new message
-      final senderResponse = await supabase
-          .from('users')
-          .select('username, avatar_url')
-          .eq('id', messageData['sender_id'])
-          .single();
+      // Fetch sender info using service
+      final senderResponse = await _userService.getUserInfo(messageData['sender_id']);
 
       final completeMessage = {
         ...messageData,
@@ -587,8 +506,8 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     final currentMessage = _messages[index];
     final previousMessage = _messages[index - 1];
     
-    final currentTime = DateTime.parse(currentMessage['created_at']);
-    final previousTime = DateTime.parse(previousMessage['created_at']);
+    final currentTime = DateTime.parse(currentMessage['created_at'] + 'Z').toLocal();
+    final previousTime = DateTime.parse(previousMessage['created_at'] + 'Z').toLocal();
     
     return !_isSameDay(currentTime , previousTime);
   }
@@ -639,79 +558,6 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
           SizedBox(width: 15.0,),
           Expanded(child: Divider(color: Colors.grey[300])),
         ],
-      ),
-    );
-  }
-
-  Widget _buildMessageBubble(Map<String, dynamic> message) {
-    final currentUserId = supabase.auth.currentUser?.id;
-    final isMe = message['sender_id'] == currentUserId;
-    final content = message['content'] ?? '';
-    final timestamp = DateTime.parse(message['created_at']);
-
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: EdgeInsets.only(
-          top: 2,
-          bottom: 2,
-          left: isMe ? 64 : 16,
-          right: isMe ? 16 : 64,
-        ),
-        child: Column(
-          crossAxisAlignment: isMe? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                color: isMe 
-                    ? const Color.fromRGBO(255, 109, 77, 1.0)
-                    : Colors.grey[200],
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(18),
-                  topRight: const Radius.circular(18),
-                  bottomLeft: Radius.circular(isMe ? 18 : 4),
-                  bottomRight: Radius.circular(isMe ? 4 : 18),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    offset: const Offset(0, 1),
-                    blurRadius: 3,
-                    color: Colors.black.withOpacity(0.1),
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Flexible(
-                    child: Text(
-                      content,
-                      style: TextStyle(
-                        color: isMe ? Colors.white : Colors.black87,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: isMe ? Colors.white70 : Colors.grey[600],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (isMe && _isLastMessageByMe(_messages.indexOf(message))) ...[
-            // if (isMe)...[
-              const SizedBox(width: 8),
-              _buildMessageStatus(message),
-            ],
-          ],
-        ),
       ),
     );
   }
@@ -778,13 +624,19 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
                   itemCount: _messages.length,
                   itemBuilder: (context, index) {
                     final message = _messages[index];
-                    final timestamp = DateTime.parse(message['created_at']);
+                    final timestamp = DateTime.parse(message['created_at'] + 'Z').toLocal();
+                    final isMe = message['sender_id'] == _chatService.currentUserId;
                     
                     return Column(
                       children: [
                         if (_shouldShowTimestamp(index))
                           _buildTimestampDivider(timestamp),
-                        _buildMessageBubble(message),
+                        MessageBubble(
+                          content: message['content'] ?? '', 
+                          timestamp: timestamp, 
+                          isMe: isMe,
+                          statusWidget: isMe && _isLastMessageByMe(index) ? _buildMessageStatus(message) : null,
+                        )
                       ],
                     );
                   },

@@ -2,9 +2,8 @@ import 'package:chat_app/screens/info.dart';
 import 'package:chat_app/widgets/chat_list.dart';
 import 'package:chat_app/widgets/personal_chat_messages.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/chat_service.dart';
 
-final supabase = Supabase.instance.client;
 final GlobalKey<ChatListState> chatListKey = GlobalKey<ChatListState>();
 
 class PersonalChatScreen extends StatefulWidget {
@@ -25,6 +24,7 @@ class PersonalChatScreen extends StatefulWidget {
 class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBindingObserver{
   final TextEditingController _messageController = TextEditingController();
   final GlobalKey _messagesKey = GlobalKey();
+  final ChatService _chatService = ChatService();
   
   String? _conversationId;
   bool _isSending = false;
@@ -48,41 +48,18 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.resumed) {
-      // Mark messages as read when user returns to the chat
-      _markAllMessagesAsRead();
+    if (state == AppLifecycleState.resumed && _conversationId != null) {
+      _chatService.markAllMessagesAsRead(_conversationId!);
     }
   }
 
-  Future<void> _GetOrCreateConversation() async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
+  Future<void> _getOrCreateConversation() async {
+    if (_chatService.currentUserId == null) return;
 
     final recipientId = widget.recipientUser['id'];
 
     try {
-      final existingConversation = await supabase
-          .from('conversations')
-          .select('id')
-          .or(
-            'and(participant1_id.eq.$currentUserId,participant2_id.eq.$recipientId),'
-            'and(participant1_id.eq.$recipientId,participant2_id.eq.$currentUserId)'
-          )
-          .maybeSingle();
-
-      if (existingConversation != null) {
-        _conversationId = existingConversation['id'];
-        return;
-      }
-
-      final newConversation = await supabase.from('conversations').insert({
-        'participant1_id': currentUserId,
-        'participant2_id': recipientId,
-        'created_at': DateTime.now().toIso8601String(),
-        'updated_at': DateTime.now().toIso8601String(),
-      }).select('id').single();
-
-      _conversationId = newConversation['id'];
+      _conversationId = await _chatService.getOrCreateConversation(recipientId);
       widget.onConversationCreated?.call();
     } catch (e) {
       print('Error creating conversation: $e');
@@ -90,87 +67,29 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
   }
 
   Future<void> _loadExistingConversation() async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
+    if (_chatService.currentUserId == null) return;
 
     final recipientId = widget.recipientUser['id'];
 
     try {
-      final existingConversation = await supabase
-          .from('conversations')
-          .select('id')
-          .or(
-            'and(participant1_id.eq.$currentUserId,participant2_id.eq.$recipientId),'
-            'and(participant1_id.eq.$recipientId,participant2_id.eq.$currentUserId)'
-          )
-          .maybeSingle();
-
-      if (existingConversation != null) {
-        _conversationId = existingConversation['id'];
-        // Mark all messages as read when opening the chat
-        await _markAllMessagesAsRead();
-      }
+      _conversationId = await _chatService.getExistingConversation(
+        recipientId, 
+        markAsRead: true,
+      );
     } catch (e) {
       print('Error loading conversation: $e');
     }
   }
 
-  Future<void> _markAllMessagesAsRead() async {
-    if (_conversationId == null) return;
-    
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
-
-    try {
-      // Get all unread messages in this conversation that were sent by the other user
-      final unreadMessages = await supabase
-          .from('messages')
-          .select('id')
-          .eq('conversation_id', _conversationId!)
-          .neq('sender_id', currentUserId);
-
-      if (unreadMessages.isEmpty) return;
-
-      // Check which messages are already marked as read
-      final messageIds = unreadMessages.map((msg) => msg['id']).toList();
-      final existingReadStatus = await supabase
-          .from('message_read_status')
-          .select('message_id')
-          .eq('user_id', currentUserId)
-          .inFilter('message_id', messageIds);
-
-      final alreadyReadIds = existingReadStatus.map((status) => status['message_id']).toSet();
-
-      // Only insert read status for messages that aren't already marked as read
-      final readStatusInserts = unreadMessages
-          .where((msg) => !alreadyReadIds.contains(msg['id']))
-          .map((msg) => {
-            'message_id': msg['id'],
-            'user_id': currentUserId,
-          }).toList();
-
-      if (readStatusInserts.isNotEmpty) {
-        await supabase
-            .from('message_read_status')
-            .insert(readStatusInserts);
-      }
-    } catch (e) {
-      print('Error marking messages as read: $e');
-    }
-  }
-
-
   Future<void> _sendMessage() async {
     final messageText = _messageController.text.trim();
     if (messageText.isEmpty || _isSending) return;
 
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
+    if (_chatService.currentUserId == null) return;
 
-    // If conversation doesn't exist yet, create it
     if (_conversationId == null) {
-      await _GetOrCreateConversation();
-      if (_conversationId == null) return; // failed to create conversation
+      await _getOrCreateConversation();
+      if (_conversationId == null) return;
     }
 
     _messageController.clear();
@@ -181,7 +100,7 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
     final tempMessage = {
       'id': 'temp_${DateTime.now().millisecondsSinceEpoch}',
       'conversation_id': _conversationId,
-      'sender_id': currentUserId,
+      'sender_id': _chatService.currentUserId,
       'content': messageText,
       'created_at': DateTime.now().toIso8601String(),
       'sender': {
@@ -194,18 +113,10 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
     (_messagesKey.currentState as dynamic)?.addOptimisticMessage(tempMessage);
 
     try {
-      await supabase.from('messages').insert({
-        'conversation_id': _conversationId,
-        'sender_id': currentUserId,
-        'content': messageText,
-        'created_at': DateTime.now().toIso8601String(),
-      });
-
-      await supabase.from('conversations').update({
-        'last_message': messageText,
-        'updated_at': DateTime.now().toIso8601String(),
-      }).eq('id', _conversationId!);
-
+      await _chatService.sendMessage(
+        conversationId: _conversationId!,
+        content: messageText,
+      );
     } catch (e) {
       (_messagesKey.currentState as dynamic)?.removeOptimisticMessage(tempMessage['id']);
       if (mounted) {

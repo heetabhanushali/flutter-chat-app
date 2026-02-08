@@ -60,7 +60,7 @@ class StorageService {
       await _supabase.from('users').upsert({
         'id': user.id,
         'avatar_url': imageUrl,
-        'updated_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
       });
     } catch (e) {
       print('Users table update failed (auth metadata updated): $e');
@@ -128,7 +128,7 @@ class StorageService {
       'user_id': user.id,
       'photo_url': imageUrl,
       'file_path': filePath,
-      'created_at': DateTime.now().toIso8601String(),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
     };
 
     await _supabase.from('user_photos').insert(record);

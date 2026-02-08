@@ -16,7 +16,7 @@ class AuthService {
   Future<String?> getEmailByUsername(String username) async {
     final result = await _supabase
         .from('users')
-        .select('email')
+        .select('email, username')
         .ilike('username', username.trim())
         .maybeSingle();
 
