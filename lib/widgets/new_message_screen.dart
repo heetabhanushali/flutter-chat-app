@@ -1,6 +1,6 @@
 import 'package:chat_app/screens/personal_chat.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/user_service.dart';
 
 class NewMessageScreen extends StatefulWidget {
   const NewMessageScreen({super.key});
@@ -10,14 +10,13 @@ class NewMessageScreen extends StatefulWidget {
 }
 
 class _NewMessageScreenState extends State<NewMessageScreen> {
+  final _userService = UserService();
   final TextEditingController _messageController = TextEditingController();
   final TextEditingController _recipientController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
   List<Map<String, dynamic>> _searchResults = [];
   bool _isSearching = false;
-
-  final SupabaseClient _supabase = Supabase.instance.client;
 
   @override
   void dispose() {
@@ -39,15 +38,10 @@ class _NewMessageScreenState extends State<NewMessageScreen> {
     try {
       setState(() => _isSearching = true);
 
-      final response = await _supabase
-          .from('users')
-          .select('id, email, username, avatar_url')
-          .or('email.ilike.%$query%,username.ilike.%$query%')
-          .neq('id', _supabase.auth.currentUser?.id ?? '')
-          .limit(10);
+      final results = await _userService.searchUsers(query);
 
       setState(() {
-        _searchResults = List<Map<String, dynamic>>.from(response);
+        _searchResults = results;
         _isSearching = false;
       });
     } catch (e) {

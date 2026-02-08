@@ -1,10 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/widgets/user_avatar.dart';
-
-final supabase = Supabase.instance.client;
+import 'package:chat_app/services/storage_service.dart';
 
 class UserImagePicker extends StatefulWidget {
   const UserImagePicker({super.key});
@@ -14,6 +12,7 @@ class UserImagePicker extends StatefulWidget {
 }
 
 class _UserImagePickerState extends State<UserImagePicker> {
+  final _storageService = StorageService();
   File? _pickedImageFile;
   String? avatarUrl;
   bool isLoading = false;
@@ -163,166 +162,56 @@ class _UserImagePickerState extends State<UserImagePicker> {
 
       // Delete old image before uploading new one
       if (avatarUrl != null) {
-        await _deleteOldImage(avatarUrl!);
+        try {
+          await _storageService.deleteProfileImageFromStorage(avatarUrl!);
+        } catch (e) {
+          print('Error deleting old image: $e');
+        }
       }
 
-      // Upload to Supabase
-      final url = await _uploadImage(File(pickedImage.path));
-      if (url != null) {
-        await _updateUserProfile(url);
-        setState(() {
-          avatarUrl = url;
-          _pickedImageFile = null; // Clear local file once uploaded
-          isLoading = false;
-        });
-      } else {
+      // Upload new image
+      try {
+        final url = await _storageService.uploadProfileImage(File(pickedImage.path));
+        if (url != null) {
+          await _storageService.updateProfileAvatar(url);
+          setState(() {
+            avatarUrl = url;
+            _pickedImageFile = null;
+            isLoading = false;
+          });
+        } else {
+          setState(() {
+            _pickedImageFile = null;
+            isLoading = false;
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Failed to upload image')),
+            );
+          }
+        }
+      } catch (e) {
         setState(() {
           _pickedImageFile = null;
           isLoading = false;
         });
-        // Show error message
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to upload image')),
+            SnackBar(content: Text('Error uploading image: $e')),
           );
         }
       }
     }
   }
 
-  Future<String?> _uploadImage(File image) async {
-    try {
-      final user = supabase.auth.currentUser;
-      if (user == null) return null;
-
-      final fileName = 'profile_${user.id}_${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-      await supabase.storage
-          .from('profile-images')
-          .upload(fileName, image);
-
-      return supabase.storage.from('profile-images').getPublicUrl(fileName);
-    } catch (e) {
-      print('Error uploading image: $e');
-      return null;
-    }
-  }
-
-  Future<void> _updateUserProfile(String imageUrl) async {
-    final user = supabase.auth.currentUser;
-    if (user == null) return;
-
-    try {
-      // Update user metadata (this is the primary storage)
-      await supabase.auth.updateUser(
-        UserAttributes(
-          data: {'avatar_url': imageUrl},
-        ),
-      );
-
-      // Try to update users table, but don't fail if it doesn't work
-      try {
-        await supabase.from('users').upsert({
-          'id': user.id,
-          'avatar_url': imageUrl,
-          'updated_at': DateTime.now().toIso8601String(),
-        });
-      } catch (tableError) {
-        print('Users table update failed (but auth metadata updated): $tableError');
-        // Continue - auth metadata update is sufficient
-      }
-    } catch (e) {
-      print('Error updating user profile: $e');
-      rethrow; // Re-throw to handle in calling function
-    }
-  }
-
-  Future<void> _deleteOldImage(String imageUrl) async {
-    try {
-      // Extract filename from the URL
-      final uri = Uri.parse(imageUrl);
-      
-      // Method 1: Try to extract from path segments
-      String? fileName;
-      final pathSegments = uri.pathSegments;
-      
-      // Look for the filename after 'profile-images'
-      for (int i = 0; i < pathSegments.length; i++) {
-        if (pathSegments[i] == 'profile-images' && i + 1 < pathSegments.length) {
-          fileName = pathSegments[i + 1];
-          break;
-        }
-      }
-      
-      // Method 2: If method 1 fails, try extracting from the full path
-      if (fileName == null || fileName.isEmpty) {
-        final path = uri.path;
-        final profileImagesIndex = path.indexOf('/profile-images/');
-        if (profileImagesIndex != -1) {
-          fileName = path.substring(profileImagesIndex + '/profile-images/'.length);
-        }
-      }
-      
-      // Method 3: Last resort - get the last part of the URL
-      if (fileName == null || fileName.isEmpty) {
-        final parts = imageUrl.split('/');
-        if (parts.isNotEmpty) {
-          fileName = parts.last;
-        }
-      }
-
-      print('Attempting to delete file: $fileName');
-      print('Full URL: $imageUrl');
-      print('URI path: ${uri.path}');
-      print('Path segments: $pathSegments');
-
-      if (fileName != null && fileName.isNotEmpty) {
-        await supabase.storage
-            .from('profile-images')
-            .remove([fileName]);
-        print('Successfully deleted image: $fileName');
-      } else {
-        print('Could not extract filename from URL');
-      }
-    } catch (e) {
-      print('Error deleting old image: $e');
-      print('Error details: ${e.toString()}');
-    }
-  }
 
   Future<void> _deleteProfileImage() async {
     if (avatarUrl == null) return;
 
-    setState(() {
-      isLoading = true;
-    });
+    setState(() => isLoading = true);
 
     try {
-      // Delete image from storage
-      await _deleteOldImage(avatarUrl!);
-      
-      // Update user profile to remove avatar URL
-      final user = supabase.auth.currentUser;
-      if (user != null) {
-        // Update user metadata
-        await supabase.auth.updateUser(
-          UserAttributes(
-            data: {'avatar_url': null},
-          ),
-        );
-
-        // Update users table
-        try {
-          await supabase.from('users').upsert({
-            'id': user.id,
-            'avatar_url': null,
-            'updated_at': DateTime.now().toIso8601String(),
-          });
-        } catch (tableError) {
-          print('Error updating users table: $tableError');
-          // Continue even if table update fails
-        }
-      }
+      await _storageService.deleteProfileImage(avatarUrl!);
 
       setState(() {
         avatarUrl = null;
@@ -341,30 +230,19 @@ class _UserImagePickerState extends State<UserImagePicker> {
     } catch (e) {
       print('Error in _deleteProfileImage: $e');
       setState(() {
-        isLoading = false;
-      });
-      
-      // Still update UI even if storage deletion failed
-      setState(() {
         avatarUrl = null;
         _pickedImageFile = null;
+        isLoading = false;
       });
-      
-      // Update user profile even if storage deletion failed
+
+      // Try to clear avatar even if storage failed
       try {
-        final user = supabase.auth.currentUser;
-        if (user != null) {
-          await supabase.auth.updateUser(
-            UserAttributes(data: {'avatar_url': null}),
-          );
-        }
-      } catch (profileError) {
-        print('Error updating profile after storage deletion failed: $profileError');
-      }
+        await _storageService.updateProfileAvatar(null);
+      } catch (_) {}
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
+          const SnackBar(
             content: Text('Image removed from profile (storage cleanup may have failed)'),
             backgroundColor: Colors.orange,
           ),
@@ -374,37 +252,17 @@ class _UserImagePickerState extends State<UserImagePicker> {
   }
 
   Future<void> _loadProfileImage() async {
-    final user = supabase.auth.currentUser;
-    if (user == null) return;
-
-    setState(() {
-      isLoading = true;
-    });
+    setState(() => isLoading = true);
 
     try {
-      // First try to get from user metadata
-      String? imageUrl = user.userMetadata?['avatar_url'] as String?;
-      
-      // If not found in metadata, try from users table
-      if (imageUrl == null) {
-        final response = await supabase
-            .from('users')
-            .select('avatar_url')
-            .eq('id', user.id)
-            .maybeSingle();
-        
-        imageUrl = response?['avatar_url'] as String?;
-      }
-
+      final imageUrl = await _storageService.loadProfileImage();
       setState(() {
         avatarUrl = imageUrl;
         isLoading = false;
       });
     } catch (e) {
       print('Error loading profile image: $e');
-      setState(() {
-        isLoading = false;
-      });
+      setState(() => isLoading = false);
     }
   }
 

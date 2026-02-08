@@ -1,8 +1,7 @@
 import 'package:chat_app/widgets/navigation.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-
-final supabase = Supabase.instance.client;
+import 'package:chat_app/services/auth_service.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -14,6 +13,7 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
+  final _authService = AuthService();
   var is_login = true;
   var obscure_text = true;
   var obscure_confirm_text = true; // Added for confirm password field
@@ -81,7 +81,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 Navigator.of(ctx).pop();
 
                 try {
-                  await supabase.auth.resetPasswordForEmail(resetEmail);
+                  await _authService.resetPassword(resetEmail);
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
@@ -120,18 +120,9 @@ class _AuthScreenState extends State<AuthScreen> {
 
         // If input looks like a username (no '@'), look up email by username
         if (!emailToLogin.contains('@')) {
-          print('Looking up username: "$emailToLogin"'); // Debug log
-          
           try {
-            final userQuery = await supabase
-                .from('users')
-                .select('email, username')
-                .ilike('username', emailToLogin.trim()) // Trim and case-insensitive
-                .maybeSingle();
-
-            print('Query result: $userQuery'); // Debug log
-
-            if (userQuery == null || userQuery['email'] == null || userQuery['email'].toString().isEmpty) {
+            final foundEmail = await _authService.getEmailByUsername(emailToLogin);
+            if (foundEmail == null) {
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text('Username "$emailToLogin" not found. Please check your username or use email instead.')),
@@ -139,9 +130,7 @@ class _AuthScreenState extends State<AuthScreen> {
               }
               return;
             }
-
-            emailToLogin = userQuery['email'].toString().trim();
-            print('Found email for username: $emailToLogin'); // Debug log
+            emailToLogin = foundEmail;
           } catch (e) {
             print('Error looking up username: $e');
             if (mounted) {
@@ -153,7 +142,7 @@ class _AuthScreenState extends State<AuthScreen> {
           }
         }
 
-        final response = await supabase.auth.signInWithPassword(
+        final response = await _authService.signIn(
           email: emailToLogin,
           password: password,
         );
@@ -172,15 +161,8 @@ class _AuthScreenState extends State<AuthScreen> {
         }
       } else {
         // REGISTRATION
-
-        // Check if username exists
-        final existing = await supabase
-            .from('users')
-            .select('id')
-            .eq('username', username)
-            .maybeSingle();
-
-        if (existing != null) {
+        final taken = await _authService.isUsernameTaken(username);
+        if (taken) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Username already exists. Please choose another one.')),
@@ -189,54 +171,34 @@ class _AuthScreenState extends State<AuthScreen> {
           return;
         }
 
-        // Sign up with username in user_metadata
-        final response = await supabase.auth.signUp(
+        final response = await _authService.signUp(
           email: email.trim(),
           password: password,
-          data: {'username': username},
+          username: username,
         );
-
-        if (response.user == null) {
-          throw AuthException('Registration failed');
-        }
-
-        print('User created: ${response.user!.id}'); // Debug log
-        print('Attempting to insert user profile...'); // Debug log
-
-        // Insert user profile - using try-catch instead of checking insertRes.error
         try {
-          await supabase.from('users').upsert({
-            'id': response.user!.id,
-            'username': username,
-            'email': email.trim(),
-          });
-
-          print('User profile inserted successfully'); // Debug log
+          await _authService.createUserProfile(
+            userId: response.user!.id,
+            username: username,
+            email: email.trim(),
+          );
 
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Registration successful!'),
-              ),
+              const SnackBar(content: Text('Registration successful!')),
             );
-
-            // Navigate to home screen after successful registration
             Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (context) => Navigation())
+              MaterialPageRoute(builder: (context) => Navigation()),
             );
           }
         } on PostgrestException catch (e) {
-          print('Database error: ${e.message}'); // Debug log
-          // Handle database errors properly
           if (e.code == '23505') {
-            // Unique constraint violation (race condition)
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Username already exists. Please choose another one.')),
               );
             }
           } else {
-            // Other database errors
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Database error: ${e.message}')),

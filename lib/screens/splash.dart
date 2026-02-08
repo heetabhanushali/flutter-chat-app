@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:chat_app/screens/auth.dart';
 import 'package:chat_app/widgets/navigation.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/auth_service.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -18,8 +18,8 @@ class _SplashScreenState extends State<SplashScreen> {
     super.initState();
     Timer(const Duration(seconds: 4), () {
       if (!mounted) return;
-      final supabase = Supabase.instance.client;
-      final session = supabase.auth.currentSession;
+      final authService = AuthService();
+      final session = authService.currentSession;
        
       if (session != null) {
         Navigator.of(context).pushReplacement(

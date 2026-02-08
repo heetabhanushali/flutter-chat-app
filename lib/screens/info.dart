@@ -1,8 +1,7 @@
 import 'package:chat_app/widgets/user_avatar.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-
-final supabase = Supabase.instance.client;
+import 'package:chat_app/services/user_service.dart';
+import 'package:chat_app/services/storage_service.dart';
 
 class InfoPage extends StatefulWidget {
   final Map<String, dynamic> recipientUser;
@@ -17,6 +16,8 @@ class InfoPage extends StatefulWidget {
 }
 
 class _InfoPageState extends State<InfoPage> {
+  final _userService = UserService();
+  final _storageService = StorageService();
   String? userName;
   String? userEmail;
   String? avatarUrl;
@@ -35,18 +36,12 @@ class _InfoPageState extends State<InfoPage> {
 
     try {
       final recipientId = widget.recipientUser['id'];
-
-      // Get user data including email from users table
-      final response = await supabase
-          .from('users')
-          .select('username, avatar_url, email')
-          .eq('id', recipientId)
-          .single();
+      final data = await _userService.getUserById(recipientId);
 
       setState(() {
-        userName = response['username'];
-        avatarUrl = response['avatar_url'];
-        userEmail = response['email'];
+        userName = data['username'];
+        avatarUrl = data['avatar_url'];
+        userEmail = data['email'];
         isLoading = false;
       });
     } catch (error) {
@@ -54,22 +49,16 @@ class _InfoPageState extends State<InfoPage> {
       setState(() {
         isLoading = false;
       });
-      // Handle error appropriately - show snackbar, dialog, etc.
     }
   }
 
   Future<void> _loadUserPhotos() async {
     try {
       final recipientId = widget.recipientUser['id'];
-      
-      final response = await supabase
-          .from('user_photos')
-          .select('*')
-          .eq('user_id', recipientId)
-          .order('created_at', ascending: false);
+      final photos = await _storageService.loadUserPhotos(recipientId);
 
       setState(() {
-        userPhotos = List<Map<String, dynamic>>.from(response);
+        userPhotos = photos;
       });
     } catch (e) {
       print('Error loading photos: $e');

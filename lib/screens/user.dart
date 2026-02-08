@@ -1,11 +1,11 @@
+import 'dart:io';
 import 'package:chat_app/screens/auth.dart';
 import 'package:chat_app/widgets/user_image_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/auth_service.dart';
+import 'package:chat_app/services/user_service.dart';
+import 'package:chat_app/services/storage_service.dart';
 import 'package:image_picker/image_picker.dart';
-import 'dart:io';
-
-final supabase = Supabase.instance.client;
 
 class UserPage extends StatefulWidget {
   const UserPage({super.key});
@@ -17,10 +17,12 @@ class UserPage extends StatefulWidget {
 class _UserPageState extends State<UserPage> {
   String? userName;
   String? userEmail;
+  final _authService = AuthService();
+  final _userService = UserService();
   bool isLoading = true;
   bool isUploadingPhoto = false;
   List<Map<String, dynamic>> userPhotos = [];
-  final ImagePicker _picker = ImagePicker();
+  final _storageService = StorageService();
 
   @override
   void initState() {
@@ -31,27 +33,17 @@ class _UserPageState extends State<UserPage> {
 
   Future<void> _loadUserData() async {
     try {
-      final user = supabase.auth.currentUser;
-      if (user != null) {
-        // Fetch user data from the users table
-        final response = await supabase
-            .from('users')
-            .select('username, email, avatar_url')
-            .eq('id', user.id)
-            .single();
+      final data = await _userService.getCurrentUserData();
 
-        setState(() {
-          userName = response['username'] ?? 'Unknown User';
-          userEmail = response['email'] ?? user.email ?? 'No email';
-          isLoading = false;
-        });
-      }
-    } catch (e) {
-      // Fallback to auth user data if users table fetch fails
-      final user = supabase.auth.currentUser;
       setState(() {
-        userName = user?.email?.split('@')[0] ?? 'Unknown User';
-        userEmail = user?.email ?? 'No email';
+        userName = data['username'] ?? 'Unknown User';
+        userEmail = data['email'] ?? 'No email';
+        isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        userName = 'Unknown User';
+        userEmail = 'No email';
         isLoading = false;
       });
     }
@@ -59,16 +51,11 @@ class _UserPageState extends State<UserPage> {
 
   Future<void> _loadUserPhotos() async {
     try {
-      final user = supabase.auth.currentUser;
-      if (user != null) {
-        final response = await supabase
-            .from('user_photos')
-            .select('*')
-            .eq('user_id', user.id)
-            .order('created_at', ascending: false);
-
+      final userId = _authService.currentUserId;
+      if (userId != null) {
+        final photos = await _storageService.loadUserPhotos(userId);
         setState(() {
-          userPhotos = List<Map<String, dynamic>>.from(response);
+          userPhotos = photos;
         });
       }
     } catch (e) {
@@ -78,7 +65,8 @@ class _UserPageState extends State<UserPage> {
 
   Future<void> _pickAndUploadImage() async {
     try {
-      final XFile? image = await _picker.pickImage(
+      final picker = ImagePicker();
+      final XFile? image = await picker.pickImage(
         source: ImageSource.gallery,
         maxWidth: 1024,
         maxHeight: 1024,
@@ -86,87 +74,56 @@ class _UserPageState extends State<UserPage> {
       );
 
       if (image != null) {
-        setState(() {
-          isUploadingPhoto = true;
-        });
+        setState(() => isUploadingPhoto = true);
 
-        final user = supabase.auth.currentUser;
-        if (user == null) return;
-
-        // Upload image to Supabase Storage
-        final fileName = 'photo_${DateTime.now().millisecondsSinceEpoch}.jpg';
-        final filePath = '${user.id}/$fileName';
-
-        await supabase.storage
-            .from('user-photos')
-            .upload(filePath, File(image.path));
-
-        // Get public URL
-        final imageUrl = supabase.storage
-            .from('user-photos')
-            .getPublicUrl(filePath);
-
-        // Save photo record to database
-        await supabase.from('user_photos').insert({
-          'user_id': user.id,
-          'photo_url': imageUrl,
-          'file_path': filePath,
-          'created_at': DateTime.now().toIso8601String(),
-        });
-
-        // Reload photos
+        await _storageService.uploadUserPhoto(File(image.path));
         await _loadUserPhotos();
 
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Photo uploaded successfully!'),
+              backgroundColor: Color.fromRGBO(255, 109, 77, 1.0),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Photo uploaded successfully!'),
-            backgroundColor: Color.fromRGBO(255, 109, 77, 1.0),
+          SnackBar(
+            content: Text('Error uploading photo: $e'),
+            backgroundColor: Colors.red,
           ),
         );
       }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error uploading photo: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
     } finally {
-      setState(() {
-        isUploadingPhoto = false;
-      });
+      setState(() => isUploadingPhoto = false);
     }
   }
 
   Future<void> _deletePhoto(Map<String, dynamic> photo) async {
     try {
-      // Delete from storage
-      await supabase.storage
-          .from('user-photos')
-          .remove([photo['file_path']]);
-
-      // Delete from database
-      await supabase
-          .from('user_photos')
-          .delete()
-          .eq('id', photo['id']);
-
-      // Reload photos
+      await _storageService.deleteUserPhoto(photo);
       await _loadUserPhotos();
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Photo deleted successfully!'),
-          backgroundColor: Color.fromRGBO(255, 109, 77, 1.0),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Photo deleted successfully!'),
+            backgroundColor: Color.fromRGBO(255, 109, 77, 1.0),
+          ),
+        );
+      }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error deleting photo: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting photo: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
@@ -504,7 +461,7 @@ class _UserPageState extends State<UserPage> {
               onPressed: () async {
                 Navigator.of(context).pop();
                 final navigator = Navigator.of(context);
-                await supabase.auth.signOut();
+                await _authService.signOut();
                 navigator.pushReplacement(MaterialPageRoute(builder:(context) => const AuthScreen(),));
               },
             ),
@@ -589,15 +546,20 @@ class _UserPageState extends State<UserPage> {
     );
   }
 
+  // REPLACE entire method body with:
   Future<void> _deleteAccount() async {
-    // TODO: Implement account deletion functionality
-    // For now, just show a placeholder message
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Delete account functionality coming soon!'),
-        duration: Duration(seconds: 2),
-      ),
-    );
+    try {
+      await _authService.deleteAccount();
+    } on UnimplementedError catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message ?? 'Not implemented yet'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
   }
 
   @override

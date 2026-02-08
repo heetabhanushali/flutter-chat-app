@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
 import 'package:chat_app/widgets/message_bubble.dart';
 import 'package:chat_app/widgets/chat_input.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:chat_app/services/ai_service.dart';
 
 class ChatBotPage extends StatefulWidget {
   const ChatBotPage({Key? key}) : super(key: key);
@@ -11,16 +9,12 @@ class ChatBotPage extends StatefulWidget {
   @override
   State<ChatBotPage> createState() => _ChatBotPageState();
 }
-
 class _ChatBotPageState extends State<ChatBotPage> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
-
-
-  static String get _apiKey => dotenv.env['GEMINI_API_KEY'] ?? '';
-  static String get _apiUrl => dotenv.env['GEMINI_API_URL'] ?? '';
+  final _aiService = AiService();
 
   @override
   void initState() {
@@ -49,7 +43,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
     _scrollToBottom();
 
     try {
-      final response = await _callGeminiAPI(message);
+      final response = await _aiService.sendMessage(message);
       
       setState(() {
         _messages.add(ChatMessage(
@@ -71,39 +65,6 @@ class _ChatBotPageState extends State<ChatBotPage> {
     }
 
     _scrollToBottom();
-  }
-
-  Future<String> _callGeminiAPI(String message) async {
-    try {
-      final response = await http.post(
-        Uri.parse('$_apiUrl?key=$_apiKey'),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'contents': [{
-            'parts': [{
-              'text': message
-            }]
-          }]
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['candidates'] != null && data['candidates'].isNotEmpty) {
-          return data['candidates'][0]['content']['parts'][0]['text'];
-        } else {
-          return 'Sorry, I couldn\'t generate a response.';
-        }
-      } else {
-        print('API Error: ${response.statusCode} - ${response.body}');
-        return 'API Error: ${response.statusCode}. Please check your API key.';
-      }
-    } catch (e) {
-      print('Network Error: $e');
-      return 'Network error. Please check your internet connection.';
-    }
   }
 
   void _scrollToBottom() {

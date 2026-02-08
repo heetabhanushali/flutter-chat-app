@@ -4,6 +4,7 @@ import 'package:chat_app/screens/auth.dart';
 import 'package:chat_app/widgets/navigation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:chat_app/services/auth_service.dart';
 
 var kColorScheme = ColorScheme.fromSeed(
   seedColor: const Color.fromRGBO(255, 109, 77, 1.0),
@@ -14,7 +15,8 @@ void main() async{
   await dotenv.load(fileName: "PRIVATE.env");
   await Supabase.initialize(
     url: dotenv.env['SUPABASE_URL']!, 
-    anonKey: dotenv.env['SUPABASE_ANON_KEY']!
+    anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
+    debug: false,
   );
 
   runApp(const App());
@@ -25,7 +27,7 @@ class App extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final supabase = Supabase.instance.client;
+    final authService = AuthService();
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -69,9 +71,9 @@ class App extends StatelessWidget {
             return const SplashScreen();
           }
           return StreamBuilder<AuthState>(
-            stream: supabase.auth.onAuthStateChange,
+            stream: authService.onAuthStateChange,
             builder: (context, snapshot) {
-              final session = supabase.auth.currentSession;
+              final session = authService.currentSession;
               if (session != null) {
                 return const Navigation();
               } else {
