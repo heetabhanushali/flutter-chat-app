@@ -102,7 +102,7 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
       'conversation_id': _conversationId,
       'sender_id': _chatService.currentUserId,
       'content': messageText,
-      'created_at': DateTime.now().toIso8601String(),
+      'created_at': DateTime.now().toUtc().toIso8601String(),
       'sender': {
         'username': 'You',
         'avatar_url': supabase.auth.currentUser?.userMetadata?['avatar_url'],

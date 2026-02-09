@@ -479,8 +479,15 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     final currentMessage = _messages[index];
     final previousMessage = _messages[index - 1];
     
-    final currentTime = DateTime.parse(currentMessage['created_at'] + 'Z').toLocal();
-    final previousTime = DateTime.parse(previousMessage['created_at'] + 'Z').toLocal();
+    final currentRaw = currentMessage['created_at'].toString();
+    final currentTime = currentRaw.endsWith('Z') || currentRaw.contains('+')
+        ? DateTime.parse(currentRaw).toLocal()
+        : DateTime.parse(currentRaw + 'Z').toLocal();
+
+    final previousRaw = previousMessage['created_at'].toString();
+    final previousTime = previousRaw.endsWith('Z') || previousRaw.contains('+')
+        ? DateTime.parse(previousRaw).toLocal()
+        : DateTime.parse(previousRaw + 'Z').toLocal();
     
     return !_isSameDay(currentTime , previousTime);
   }
@@ -597,7 +604,10 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
                   itemCount: _messages.length,
                   itemBuilder: (context, index) {
                     final message = _messages[index];
-                    final timestamp = DateTime.parse(message['created_at'] + 'Z').toLocal();
+                    final rawTime = message['created_at'].toString();
+                    final timestamp = rawTime.endsWith('Z') || rawTime.contains('+')
+                                      ? DateTime.parse(rawTime).toLocal()
+                                      : DateTime.parse(rawTime + 'Z').toLocal();
                     final isMe = message['sender_id'] == _chatService.currentUserId;
                     
                     return Column(

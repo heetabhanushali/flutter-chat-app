@@ -53,31 +53,25 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
     try {
       if (_chatService.currentUserId == null) return;
 
-      // Get all conversations from service
       final conversationsData = await _chatService.loadConversations();
 
       if (!mounted) return;
 
-      final newConversations = <ConversationWithUser>[];
-
-      for (final conv in conversationsData) {
-        final isUnread = await _chatService.isConversationUnread(conv['id']);
-
-        newConversations.add(ConversationWithUser(
+      final newConversations = conversationsData.map((conv) {
+        return ConversationWithUser(
           id: conv['id'],
           otherUser: UserProfile.fromJson(conv['otherUser']),
           lastMessage: conv['lastMessage'],
-          updatedAt: DateTime.parse(conv['updatedAt'] + 'Z').toLocal(),
-          isUnread: isUnread,
-        ));
-      }
+          updatedAt: DateTime.parse(conv['updatedAt'] + 'Z'),
+          isUnread: conv['isUnread'],
+        );
+      }).toList();
 
       setState(() {
         conversations = newConversations;
         isLoading = false;
         error = null;
       });
-
     } catch (e) {
       print('Error loading conversations: $e');
       if (mounted) {
@@ -104,35 +98,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         }
       },
       onNewMessage: (messageData) async {
-        final senderId = messageData['sender_id'];
-        final conversationId = messageData['conversation_id'];
-        
-        // Check if conversation already exists in list
-        final existingIndex = conversations.indexWhere((c) => c.id == conversationId);
-
-        if (existingIndex == -1) {
-          // New conversation - process and add
-          final convData = await _realtimeService.processNewMessageForConversationList(messageData);
-          
-          if (convData != null && mounted) {
-            final isUnread = senderId != _chatService.currentUserId;
-            setState(() {
-              conversations.insert(
-                0,
-                ConversationWithUser(
-                  id: convData['id'],
-                  otherUser: UserProfile.fromJson(convData['otherUser']),
-                  lastMessage: convData['lastMessage'],
-                  updatedAt: DateTime.parse(convData['updatedAt'] + 'Z').toLocal(),
-                  isUnread: isUnread,
-                ),
-              );
-            });
-          }
-        } else {
-          // Existing conversation - reload to update
-          loadConversations();
-        }
+        loadConversations();
       },
       onReadStatusChange: () {
         loadConversations();

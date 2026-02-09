@@ -68,145 +68,39 @@ class ChatService {
   // CONVERSATION MANAGEMENT
   // ===============================================
 
+  /// Fetches all conversations for the current user using RPC
+  /// Single database call instead of multiple
   Future<List<Map<String, dynamic>>> loadConversations() async {
     if (currentUserId == null) {
       throw Exception('User not authenticated');
     }
 
     try {
-      // Step 1: Get all deleted conversations for current user
-      final deletedConversations = await _getDeletedConversationsMap();
+      final response = await _supabase.rpc(
+        'get_user_conversations',
+        params: {'p_user_id': currentUserId},
+      );
 
-      // Step 2: Get all conversations where user is a participant
-      final allConversations = await _getAllUserConversations();
-
-      // Step 3: Filter and process conversations
       final List<Map<String, dynamic>> result = [];
 
-      for (final conv in allConversations) {
-        final conversationId = conv['id'];
-
-        if (deletedConversations.containsKey(conversationId)) {
-          // Conversation was deleted - check if there are new messages
-          final deletedAtUtc = deletedConversations[conversationId]!;
-          final hasNewMessages = await _hasMessagesAfterDeletion(conversationId, deletedAtUtc);
-
-          if (hasNewMessages) {
-            final processedConv = _processConversation(conv);
-            result.add(processedConv);
-          }
-        } else {
-          // Conversation not deleted - include it
-          final processedConv = _processConversation(conv);
-          result.add(processedConv);
-        }
+      for (final conv in response) {
+        result.add({
+          'id': conv['conversation_id'],
+          'otherUser': {
+            'id': conv['other_user_id'],
+            'username': conv['other_user_username'],
+            'avatar_url': conv['other_user_avatar_url'],
+          },
+          'lastMessage': conv['last_message'] ?? '',
+          'updatedAt': conv['updated_at'],
+          'isUnread': conv['is_unread'] ?? false,
+        });
       }
 
       return result;
     } catch (e) {
       print('Error loading conversations: $e');
       rethrow;
-    }
-  }
-
-  /// Helper: Get deleted conversations as a Map
-  Future<Map<String, DateTime>> _getDeletedConversationsMap() async {
-    final response = await _supabase
-        .from('user_deleted_conversations')
-        .select('conversation_id, deleted_at')
-        .eq('user_id', currentUserId!);
-
-    final Map<String, DateTime> deletedConversations = {};
-    for (final deleted in response) {
-      deletedConversations[deleted['conversation_id']] =
-          DateTime.parse(deleted['deleted_at']).toUtc();
-    }
-
-    // print("getDeletedConversationsMap: $deletedConversations");
-    return deletedConversations;
-  }
-
-  /// Helper: Get all conversations where current user is a participant
-  Future<List<Map<String, dynamic>>> _getAllUserConversations() async {
-    final response = await _supabase
-        .from('conversations')
-        .select('''
-          *,
-          participant1:users!participant1_id(id, username, avatar_url),
-          participant2:users!participant2_id(id, username, avatar_url)
-        ''')
-        .or('participant1_id.eq.$currentUserId,participant2_id.eq.$currentUserId')
-        .order('updated_at', ascending: false);
-
-    // print("getallUserConversations: ${response.length} Conversations");
-    return List<Map<String, dynamic>>.from(response);
-  }
-
-  /// Helper: Check if there are messages after deletion time
-  Future<bool> _hasMessagesAfterDeletion(String conversationId, DateTime deletedAtUtc) async {
-    final messagesAfterDeletion = await _supabase
-        .from('messages')
-        .select('id, created_at')
-        .eq('conversation_id', conversationId)
-        .order('created_at', ascending: false)
-        .limit(5);
-
-    final validMessages = messagesAfterDeletion.where((msg) {
-      final msgTime = DateTime.parse(msg['created_at'] + 'Z').toUtc();
-      return msgTime.isAfter(deletedAtUtc);
-    }).toList();
-
-    // print("has messages after deletion: ${validMessages.length} found");
-    // print("first valid message time: ${validMessages.isNotEmpty? DateTime.parse(validMessages.first['created_at'] + 'Z').toUtc() : 'none'}");
-    // print("comparison of ${deletedAtUtc} with ${validMessages.isNotEmpty? DateTime.parse(validMessages.first['created_at'] + 'Z').toUtc() : 'none'}");
-    return validMessages.isNotEmpty;
-  }
-
-  /// Helper: Process conversation to extract other user info
-  Map<String, dynamic> _processConversation(Map<String, dynamic> conv) {
-    final isParticipant1 = conv['participant1_id'] == currentUserId;
-    final otherUser = isParticipant1 ? conv['participant2'] : conv['participant1'];
-
-    return {
-      'id': conv['id'],
-      'otherUser': otherUser,
-      'lastMessage': conv['last_message'] ?? '',
-      'updatedAt': conv['updated_at'],
-    };
-  }
-
-  /// Check if a conversation has unread messages
-  Future<bool> isConversationUnread(String conversationId) async {
-    if (currentUserId == null) return false;
-
-    try {
-      // Get the latest message in this conversation
-      final latestMessage = await _supabase
-          .from('messages')
-          .select('id, sender_id, created_at')
-          .eq('conversation_id', conversationId)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
-
-      if (latestMessage == null) return false;
-
-      // If current user sent the latest message, it's not unread for them
-      if (latestMessage['sender_id'] == currentUserId) return false;
-
-      // Check if current user has read this message
-      final readStatus = await _supabase
-          .from('message_read_status')
-          .select('id')
-          .eq('message_id', latestMessage['id'])
-          .eq('user_id', currentUserId!)
-          .maybeSingle();
-
-      // If no read status exists, the message is unread
-      return readStatus == null;
-    } catch (e) {
-      print('Error checking read status: $e');
-      return false;
     }
   }
 
