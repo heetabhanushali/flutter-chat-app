@@ -151,6 +151,7 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
             Navigator.pop(context , true);
           } 
         ),
+
         title: GestureDetector(
           onTap: (){
             Navigator.of(context).push(MaterialPageRoute(builder:(context) => InfoPage(recipientUser: widget.recipientUser),));

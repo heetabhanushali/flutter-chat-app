@@ -151,6 +151,11 @@ class _AuthScreenState extends State<AuthScreen> {
           throw AuthException('Login failed');
         }
 
+        await _authService.recoverEncryptionKeys(
+          userId: response.session!.user.id,
+          password: password,
+        );
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Login successful!')),
@@ -183,10 +188,16 @@ class _AuthScreenState extends State<AuthScreen> {
             email: email.trim(),
           );
 
+          await _authService.setupEncryptionKeys(
+            userId: response.user!.id,
+            password: password,
+          );
+
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Registration successful!')),
             );
+
             Navigator.of(context).pushReplacement(
               MaterialPageRoute(builder: (context) => Navigation()),
             );

@@ -1,7 +1,9 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/encryption_service.dart';
 
 class AuthService {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final EncryptionService _encryptionService = EncryptionService();
 
   // ─── Getters ───────────────────────────────────────────────
 
@@ -97,16 +99,63 @@ class AuthService {
     await _supabase.auth.resetPasswordForEmail(email);
   }
 
-  // ─── Sign Out ──────────────────────────────────────────────
-
-  Future<void> signOut() async {
-    await _supabase.auth.signOut();
-  }
-
   // ─── Delete Account ───────────────────────────────────────
 
   Future<void> deleteAccount() async {
     // TODO: Implement full deletion (messages, photos, storage, auth user)
     throw UnimplementedError('Delete account functionality coming soon!');
   }
+
+  // ─── E2EE Key Setup ───────────────────────────────────────
+
+  /// Called after registration — generates fresh keys
+  Future<void> setupEncryptionKeys({
+    required String userId,
+    required String password,
+  }) async {
+    await _encryptionService.generateAndStoreKeys(
+      userId: userId,
+      password: password,
+    );
+  }
+
+  /// Called after login — recovers keys to this device
+  Future<void> recoverEncryptionKeys({
+    required String userId,
+    required String password,
+  }) async {
+    try{
+      final hasLocal = await _encryptionService.hasLocalKeys();
+      if (hasLocal) return; 
+
+      final hasServer = await _encryptionService.hasServerKeys(userId);
+      if (!hasServer){
+        print("Upgrading old user to E2EE...");
+        await _encryptionService.generateAndStoreKeys(
+          userId: userId,
+          password: password,
+        );
+        return;
+      } 
+
+      final success = await _encryptionService.recoverKeysFromServer(
+        userId: userId,
+        password: password,
+      );
+
+      if (!success) {
+        print('Warning: Could not recover encryption keys');
+      }
+    } catch (e) {
+      print('E2EE setup skipped: $e');
+    }
+  } 
+
+  // ─── Modify existing signOut ──────────────────────────────
+
+  Future<void> signOut() async {
+    await _encryptionService.clearLocalKeys();
+    await _supabase.auth.signOut();
+  }
+
 }
