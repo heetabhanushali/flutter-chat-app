@@ -1,7 +1,9 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/encryption_service.dart';
 
 class ChatService {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final EncryptionService _encryptionService = EncryptionService();
 
   String? get currentUserId => _supabase.auth.currentUser?.id;
 
@@ -69,7 +71,6 @@ class ChatService {
   // ===============================================
 
   /// Fetches all conversations for the current user using RPC
-  /// Single database call instead of multiple
   Future<List<Map<String, dynamic>>> loadConversations() async {
     if (currentUserId == null) {
       throw Exception('User not authenticated');
@@ -84,6 +85,20 @@ class ChatService {
       final List<Map<String, dynamic>> result = [];
 
       for (final conv in response) {
+        // Decrypt last message
+        String lastMessage = conv['last_message'] ?? '';
+
+        if (lastMessage.isNotEmpty) {
+          try {
+            lastMessage = await _encryptionService.decryptMessage(
+              encryptedText: lastMessage,
+              otherUserId: conv['other_user_id'],
+            );
+          } catch (_) {
+            lastMessage = '[Encrypted Message]';
+          }
+        }
+
         result.add({
           'id': conv['conversation_id'],
           'otherUser': {
@@ -91,7 +106,7 @@ class ChatService {
             'username': conv['other_user_username'],
             'avatar_url': conv['other_user_avatar_url'],
           },
-          'lastMessage': conv['last_message'] ?? '',
+          'lastMessage': lastMessage,
           'updatedAt': conv['updated_at'],
           'isUnread': conv['is_unread'] ?? false,
         });
@@ -170,6 +185,16 @@ class ChatService {
     }
 
     try {
+      final conversation = await _supabase
+          .from('conversations')
+          .select('participant1_id, participant2_id')
+          .eq('id', conversationId)
+          .single();
+
+      final recipientId = conversation['participant1_id'] == currentUserId
+          ? conversation['participant2_id']
+          : conversation['participant1_id'];
+
       final deletedAt = await getConversationDeletionTime(conversationId);
 
       // Fetch all messages for the conversation
@@ -180,26 +205,37 @@ class ChatService {
           .order('created_at', ascending: true);
 
       // Filter messages based on deletion time
+      List<Map<String, dynamic>> filteredMessages;
       if (deletedAt != null) {
-        final filteredMessages = messages.where((msg) {
+        filteredMessages = messages.where((msg) {
           final rawTime = msg['created_at'];
           DateTime msgTimeUtc;
-          
+
           if (rawTime.toString().endsWith('Z') || rawTime.toString().contains('+')) {
             msgTimeUtc = DateTime.parse(rawTime);
           } else {
             msgTimeUtc = DateTime.parse(rawTime + 'Z').toUtc();
           }
-          
-          // print("Message time : ${msgTimeUtc}, Deleted at: ${deletedAt}");
 
           return msgTimeUtc.isAfter(deletedAt);
         }).toList();
-
-        return List<Map<String, dynamic>>.from(filteredMessages);
+      } else {
+        filteredMessages = List<Map<String, dynamic>>.from(messages);
       }
 
-      return List<Map<String, dynamic>>.from(messages);
+      for (var msg in filteredMessages) {
+        try {
+          msg['content'] = await _encryptionService.decryptMessage(
+            encryptedText: msg['content'],
+            otherUserId: recipientId,
+          );
+        } catch (e) {
+          print('Failed to decrypt message ${msg['id']}: $e');
+          msg['content'] = '[Unable to decrypt]';
+        }
+      }
+
+      return filteredMessages;
     } catch (e) {
       print('Error loading messages: $e');
       rethrow;
@@ -217,17 +253,42 @@ class ChatService {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
 
+      // Get recipient ID from conversation
+      final conversation = await _supabase
+          .from('conversations')
+          .select('participant1_id, participant2_id')
+          .eq('id', conversationId)
+          .single();
+
+      final recipientId = conversation['participant1_id'] == currentUserId
+          ? conversation['participant2_id']
+          : conversation['participant1_id'];
+
+      // Encrypt the message
+      String messageToStore = content;
+      String lastMessageToStore = content;
+
+      try {
+        messageToStore = await _encryptionService.encryptMessage(
+          plainText: content,
+          otherUserId: recipientId,
+        );
+        lastMessageToStore = messageToStore;
+      } catch (e) {
+        print('Encryption failed, sending unencrypted: $e');
+      }
+
       // Insert message
       final message = await _supabase.from('messages').insert({
         'conversation_id': conversationId,
         'sender_id': currentUserId,
-        'content': content,
+        'content': messageToStore,
         'created_at': now,
       }).select().single();
 
       // Update conversation's last message
       await _supabase.from('conversations').update({
-        'last_message': content,
+        'last_message': lastMessageToStore,
         'updated_at': now,
       }).eq('id', conversationId);
 

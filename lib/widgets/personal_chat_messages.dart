@@ -4,6 +4,7 @@ import 'package:chat_app/services/chat_service.dart';
 import 'package:chat_app/services/user_service.dart';
 import 'package:chat_app/widgets/message_bubble.dart';
 import 'package:chat_app/services/realtime_service.dart';
+import 'package:chat_app/services/encryption_service.dart';
 
 final supabase = Supabase.instance.client;
 
@@ -38,6 +39,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   final ChatService _chatService = ChatService();
   final UserService _userService = UserService();
   final RealtimeService _realtimeService = RealtimeService();
+  final EncryptionService _encryptionService = EncryptionService();
 
   @override
   void initState() {
@@ -48,10 +50,17 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   }
 
   @override
+  @override
   void didUpdateWidget(PersonalChatMessages oldWidget) {
     super.didUpdateWidget(oldWidget);
     
     if (oldWidget.conversationId != widget.conversationId) {
+      // If we already set the conversation ID via setConversationId,
+      // don't reset everything
+      if (_currentConversationId == widget.conversationId) {
+        return;
+      }
+      
       _currentConversationId = widget.conversationId;
       _hasLoadedOnce = false;
       _deletionCutoffTime = null;
@@ -352,42 +361,49 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
 
   void _addNewMessage(Map<String, dynamic> messageData) async {
     final currentUserId = _chatService.currentUserId;
-    
-    // Check if message already exists (prevent duplicates)
+
     final messageExists = _messages.any((msg) => msg['id'] == messageData['id']);
     if (messageExists) {
       return;
     }
 
-    // Check against deletion cutoff time
     final deletedAt = await _getConversationDeletionTime();
     if (deletedAt != null) {
       final rawTime = messageData['created_at'];
       DateTime messageTimeUtc;
-      
+
       if (rawTime.toString().endsWith('Z') || rawTime.toString().contains('+')) {
         messageTimeUtc = DateTime.parse(rawTime);
       } else {
         messageTimeUtc = DateTime.parse(rawTime + 'Z').toUtc();
       }
-      
+
       if (messageTimeUtc.isBefore(deletedAt) || messageTimeUtc.isAtSameMomentAs(deletedAt)) {
         return;
       }
     }
 
-    // Replace optimistic message with real message
+    try {
+      messageData['content'] = await _encryptionService.decryptMessage(
+        encryptedText: messageData['content'],
+        otherUserId: widget.recipientUser['id'],
+      );
+    } catch (e) {
+      print('Failed to decrypt realtime message: $e');
+      messageData['content'] = '[Unable to decrypt]';
+    }
+
     if (messageData['sender_id'] == currentUserId) {
-      final tempMessageExists = _messages.any((msg) => 
-        msg['sender_id'] == currentUserId && 
+      final tempMessageExists = _messages.any((msg) =>
+        msg['sender_id'] == currentUserId &&
         msg['content'] == messageData['content'] &&
         msg['id'].toString().startsWith('temp_')
       );
-      
+
       if (tempMessageExists) {
         setState(() {
-          final index = _messages.indexWhere((msg) => 
-            msg['sender_id'] == currentUserId && 
+          final index = _messages.indexWhere((msg) =>
+            msg['sender_id'] == currentUserId &&
             msg['content'] == messageData['content'] &&
             msg['id'].toString().startsWith('temp_')
           );
@@ -403,7 +419,6 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     }
 
     try {
-      // Fetch sender info using service
       final senderResponse = await _userService.getUserInfo(messageData['sender_id']);
 
       final completeMessage = {
@@ -431,6 +446,16 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
         await _markMessageAsRead(messageData['id'], messageData['sender_id']);
       }
     }
+  }
+
+  void setConversationId(String? conversationId) {
+    if (_currentConversationId == conversationId) return;
+    
+    _currentConversationId = conversationId;
+
+    _realtimeService.unsubscribe(_messageSubscription);
+    _realtimeService.unsubscribe(_readStatusSubscription);
+    _setupRealtimeSubscription();
   }
 
   void addOptimisticMessage(Map<String, dynamic> message) {
@@ -579,8 +604,41 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
           : _messages.isEmpty
               ? Center(
                   child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.start,
                     children: [
+
+                      Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                        margin: const EdgeInsets.symmetric(horizontal: 40, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color.fromRGBO(255, 109, 77, 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.lock,
+                              size: 12,
+                              color: const Color.fromRGBO(255, 109, 77, 0.8),
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                'Messages are end-to-end encrypted. No one outside of this chat can read them.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: const Color.fromRGBO(255, 109, 77, 0.8),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 200),
+
                       CircleAvatar(
                         radius: 40,
                         backgroundColor: Colors.blue[100],
@@ -601,9 +659,44 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
               : ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.symmetric(vertical: 16),
-                  itemCount: _messages.length,
+                  itemCount: _messages.length + 1,
                   itemBuilder: (context, index) {
-                    final message = _messages[index];
+                    
+                    if (index == 0) {
+                      return Container(
+                        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+                        margin: const EdgeInsets.symmetric(horizontal: 40, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color.fromRGBO(255, 109, 77, 0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.lock,
+                              size: 12,
+                              color: const Color.fromRGBO(255, 109, 77, 0.8),
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                'Messages are end-to-end encrypted. No one outside of this chat can read them.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: const Color.fromRGBO(255, 109, 77, 0.8),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+
+                    final messageIndex = index - 1;
+                    final message = _messages[messageIndex];
                     final rawTime = message['created_at'].toString();
                     final timestamp = rawTime.endsWith('Z') || rawTime.contains('+')
                                       ? DateTime.parse(rawTime).toLocal()
@@ -612,13 +705,13 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
                     
                     return Column(
                       children: [
-                        if (_shouldShowTimestamp(index))
+                        if (_shouldShowTimestamp(messageIndex))
                           _buildTimestampDivider(timestamp),
                         MessageBubble(
                           content: message['content'] ?? '', 
                           timestamp: timestamp, 
                           isMe: isMe,
-                          statusWidget: isMe && _isLastMessageByMe(index) ? _buildMessageStatus(message) : null,
+                          statusWidget: isMe && _isLastMessageByMe(messageIndex) ? _buildMessageStatus(message) : null,
                         )
                       ],
                     );

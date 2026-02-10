@@ -87,15 +87,23 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
 
     if (_chatService.currentUserId == null) return;
 
-    if (_conversationId == null) {
-      await _getOrCreateConversation();
-      if (_conversationId == null) return;
-    }
-
     _messageController.clear();
     setState(() {
       _isSending = true;
     });
+
+    // If no conversation exists, create one first WITHOUT rebuilding messages
+    if (_conversationId == null) {
+      await _getOrCreateConversation();
+      if (_conversationId == null) {
+        setState(() {
+          _isSending = false;
+        });
+        return;
+      }
+
+      (_messagesKey.currentState as dynamic)?.setConversationId(_conversationId);
+    }
 
     final tempMessage = {
       'id': 'temp_${DateTime.now().millisecondsSinceEpoch}',
@@ -189,8 +197,6 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
             conversationId: _conversationId,
             recipientUser: widget.recipientUser,
           ),
-
-          
           
           //---------------------------------------------------------------------------
           // MESSAGE INPUT AREA
