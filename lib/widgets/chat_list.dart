@@ -23,6 +23,9 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   RealtimeChannel? _conversationsSubscription;
   final ChatService _chatService = ChatService();
   final RealtimeService _realtimeService = RealtimeService();
+  final Map<String, bool> _typingUsers = {};
+  final Map<String, Timer> _typingTimers = {};
+  final Map<String, RealtimeChannel> _typingChannels = {};
 
   @override
   void initState() {
@@ -30,11 +33,12 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _initConversations();
   }
-
+  
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _conversationsSubscription?.unsubscribe();
+    _cleanupTypingSubscriptions();
     super.dispose();
   }
 
@@ -72,6 +76,8 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         isLoading = false;
         error = null;
       });
+
+      _setupTypingSubscriptions();
     } catch (e) {
       print('Error loading conversations: $e');
       if (mounted) {
@@ -81,6 +87,57 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         });
       }
     }
+  }
+
+  void _setupTypingSubscriptions() {
+    _cleanupTypingSubscriptions();
+
+    for (final conv in conversations) {
+      final conversationId = conv.id;
+      final otherUserId = conv.otherUser.id;
+
+      final channel = supabase
+          .channel('typing_$conversationId')
+          .onBroadcast(
+            event: 'typing',
+            callback: (payload) {
+              final typingUserId = payload['user_id'] as String?;
+              if (typingUserId != null && typingUserId == otherUserId && mounted) {
+                setState(() {
+                  _typingUsers[otherUserId] = true;
+                });
+
+                _typingTimers[otherUserId]?.cancel();
+                _typingTimers[otherUserId] = Timer(
+                  const Duration(seconds: 3),
+                  () {
+                    if (mounted) {
+                      setState(() {
+                        _typingUsers[otherUserId] = false;
+                      });
+                    }
+                  },
+                );
+              }
+            },
+          )
+          .subscribe();
+
+      _typingChannels[conversationId] = channel;
+    }
+  }
+
+  void _cleanupTypingSubscriptions() {
+    for (final channel in _typingChannels.values) {
+      channel.unsubscribe();
+    }
+    _typingChannels.clear();
+
+    for (final timer in _typingTimers.values) {
+      timer.cancel();
+    }
+    _typingTimers.clear();
+    _typingUsers.clear();
   }
 
   void _setupRealtimeSubscription() {
@@ -207,6 +264,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         itemCount: conversations.length,
         itemBuilder: (context, index) {
           final conversation = conversations[index];
+          final isTyping = _typingUsers[conversation.otherUser.id] ?? false;
           return Dismissible(
             key: Key('conversation_${conversation.id}_${conversation.hashCode}'),
             direction: DismissDirection.endToStart,
@@ -268,6 +326,7 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
             },
             child: ConversationTile(
               conversation: conversation,
+              isTyping: isTyping,
               onTap: () async {
                 await Navigator.push(
                   context,

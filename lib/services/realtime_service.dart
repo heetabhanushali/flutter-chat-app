@@ -156,6 +156,60 @@ class RealtimeService {
   }
 
   // ============================================================
+  // TYPING INDICATOR
+  // ============================================================
+
+  RealtimeChannel? _typingChannel;
+  String? _currentTypingConversationId;
+
+  /// Subscribe to typing events AND enable broadcasting on same channel
+  RealtimeChannel subscribeToTyping({
+    required String conversationId,
+    required Function(String userId) onUserTyping,
+  }) {
+    // Clean up old channel
+    _typingChannel?.unsubscribe();
+
+    _currentTypingConversationId = conversationId;
+
+    _typingChannel = _supabase
+        .channel('typing_$conversationId')
+        .onBroadcast(
+          event: 'typing',
+          callback: (payload) {
+            final typingUserId = payload['user_id'] as String?;
+            if (typingUserId != null && typingUserId != currentUserId) {
+              onUserTyping(typingUserId);
+            }
+          },
+        )
+        .subscribe();
+
+    return _typingChannel!;
+  }
+
+  /// Broadcast typing on the SAME channel that's already subscribed
+  Future<void> broadcastTyping({
+    required String conversationId,
+  }) async {
+    if (currentUserId == null) return;
+    if (_typingChannel == null) return;
+    if (_currentTypingConversationId != conversationId) return;
+
+    try {
+      await _typingChannel!.sendBroadcastMessage(
+        event: 'typing',
+        payload: {
+          'user_id': currentUserId,
+          'timestamp': DateTime.now().toIso8601String(),
+        },
+      );
+    } catch (e) {
+      print('Typing broadcast failed: $e');
+    }
+  }
+
+  // ============================================================
   // UTILITY
   // ============================================================
 

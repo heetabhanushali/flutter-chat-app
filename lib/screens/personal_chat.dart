@@ -3,6 +3,9 @@ import 'package:chat_app/widgets/chat_list.dart';
 import 'package:chat_app/widgets/personal_chat_messages.dart';
 import 'package:flutter/material.dart';
 import 'package:chat_app/services/chat_service.dart';
+import 'package:chat_app/services/realtime_service.dart';
+import 'dart:async';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 final GlobalKey<ChatListState> chatListKey = GlobalKey<ChatListState>();
 
@@ -21,11 +24,16 @@ class PersonalChatScreen extends StatefulWidget {
   State<PersonalChatScreen> createState() => _PersonalChatScreenState();
 }
 
-class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBindingObserver{
+class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBindingObserver, TickerProviderStateMixin {
   final TextEditingController _messageController = TextEditingController();
   final GlobalKey _messagesKey = GlobalKey();
   final ChatService _chatService = ChatService();
-  
+  final RealtimeService _realtimeService = RealtimeService();
+  RealtimeChannel? _typingChannel;
+  Timer? _typingDebounce;
+  bool _isRecipientTyping = false;
+  Timer? _typingTimeout;
+  late AnimationController _typingAnimController;
   String? _conversationId;
   bool _isSending = false;
 
@@ -33,8 +41,15 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _loadExistingConversation().then((_){
+    
+    _typingAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+    
+    _loadExistingConversation().then((_) {
       setState(() {});
+      _setupTypingSubscription();
     });
   }
 
@@ -42,6 +57,10 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _messageController.dispose();
+    _typingAnimController.dispose(); 
+    _realtimeService.unsubscribe(_typingChannel);
+    _typingDebounce?.cancel();
+    _typingTimeout?.cancel();
     super.dispose();
   }
 
@@ -61,6 +80,7 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
     try {
       _conversationId = await _chatService.getOrCreateConversation(recipientId);
       widget.onConversationCreated?.call();
+      _setupTypingSubscription();  // ← ADD THIS
     } catch (e) {
       print('Error creating conversation: $e');
     }
@@ -143,6 +163,82 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
     }
   }
 
+  void _setupTypingSubscription() {
+    if (_conversationId == null) return;
+
+    _realtimeService.unsubscribe(_typingChannel);
+
+    _typingChannel = _realtimeService.subscribeToTyping(
+      conversationId: _conversationId!,
+      onUserTyping: (userId) {
+        if (userId == widget.recipientUser['id'] && mounted) {
+          setState(() {
+            _isRecipientTyping = true;
+          });
+
+          // Reset the timeout
+          _typingTimeout?.cancel();
+          _typingTimeout = Timer(const Duration(seconds: 3), () {
+            if (mounted) {
+              setState(() {
+                _isRecipientTyping = false;
+              });
+            }
+          });
+        }
+      },
+    );
+  }
+
+  void _onTyping() {
+    if (_conversationId == null) return;
+
+    // Debounce: only send typing event every 2 seconds
+    if (_typingDebounce?.isActive ?? false) return;
+
+    _realtimeService.broadcastTyping(conversationId: _conversationId!);
+
+    _typingDebounce = Timer(const Duration(seconds: 2), () {});
+  }
+
+  Widget _buildTypingDots() {
+    return SizedBox(
+      width: 32,
+      height: 20,
+      child: AnimatedBuilder(
+        animation: _typingAnimController,
+        builder: (context, child) {
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(3, (index) {
+              final delay = index * 0.25;
+              final value = ((_typingAnimController.value + delay) % 1.0);
+              final bounce = value < 0.5
+                  ? (value * 2)
+                  : (2 - value * 2);
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 1.5),
+                child: Transform.translate(
+                  offset: Offset(0, -4 * bounce),
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[500]!.withOpacity(0.4 + 0.6 * bounce),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+              );
+            }),
+          );
+        },
+      ),
+    );
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -197,6 +293,27 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
             conversationId: _conversationId,
             recipientUser: widget.recipientUser,
           ),
+
+          if (_isRecipientTyping)
+          Container(
+            padding: const EdgeInsets.only(left: 20, bottom: 4),
+            alignment: Alignment.centerLeft,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildTypingDots(),
+                const SizedBox(width: 8),
+                Text(
+                  '${widget.recipientUser['username'] ?? 'User'} is typing',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey[600],
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
           
           //---------------------------------------------------------------------------
           // MESSAGE INPUT AREA
@@ -240,6 +357,7 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
                         onSubmitted: (_) => _sendMessage(),
                         onChanged:(text) {
                           setState(() {
+                            _onTyping();
                           });
                         },
                       ),
