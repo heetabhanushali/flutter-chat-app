@@ -5,6 +5,8 @@ import 'package:chat_app/services/user_service.dart';
 import 'package:chat_app/widgets/message_bubble.dart';
 import 'package:chat_app/services/realtime_service.dart';
 import 'package:chat_app/services/encryption_service.dart';
+import 'package:chat_app/services/message_queue_service.dart';
+import 'dart:async';
 
 final supabase = Supabase.instance.client;
 
@@ -32,7 +34,6 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   Map<String, DateTime?> _messageReadStatusCache = {};
   RealtimeChannel? _readStatusSubscription;
   
-  // Add these for better state management
   String? _currentConversationId;
   bool _hasLoadedOnce = false;
   DateTime? _deletionCutoffTime; 
@@ -40,6 +41,8 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   final UserService _userService = UserService();
   final RealtimeService _realtimeService = RealtimeService();
   final EncryptionService _encryptionService = EncryptionService();
+  final MessageQueueService _messageQueue = MessageQueueService();
+  StreamSubscription<MessageStatusEvent>? _queueStatusSub;
 
   @override
   void initState() {
@@ -47,9 +50,9 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     _currentConversationId = widget.conversationId;
     _loadMessages();
     _setupRealtimeSubscription();
+    _listenToQueueStatus();
   }
 
-  @override
   @override
   void didUpdateWidget(PersonalChatMessages oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -78,7 +81,42 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     _scrollController.dispose();
     _realtimeService.unsubscribe(_messageSubscription);
     _realtimeService.unsubscribe(_readStatusSubscription);
+    _queueStatusSub?.cancel();
     super.dispose();
+  }
+
+  void _listenToQueueStatus() {
+    _queueStatusSub?.cancel();
+    _queueStatusSub = _messageQueue.statusUpdates.listen((event) {
+      if (!mounted) return;
+
+      final messageIndex = _messages.indexWhere((msg) => msg['id'] == event.messageId);
+      if (messageIndex == -1) return;
+
+      final currentMessage = _messages[messageIndex];
+
+      if (currentMessage['conversation_id'] != null &&
+          currentMessage['conversation_id'] != _currentConversationId) {
+        return;
+      }
+
+      setState(() {
+        if (event.status == 'sent' && event.serverMessage != null) {
+          _messages[messageIndex] = {
+            ...event.serverMessage!,
+            'content': currentMessage['content'],
+            'sender': currentMessage['sender'],
+            'status': 'sent',
+            'client_message_id': currentMessage['client_message_id'],
+          };
+        } else {
+          _messages[messageIndex] = {
+            ...currentMessage,
+            'status': event.status,
+          };
+        }
+      });
+    });
   }
 
   Future<DateTime?> _getConversationDeletionTime() async {
@@ -153,69 +191,135 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
 
   Widget _buildMessageStatus(Map<String, dynamic> message) {
     final messageId = message['id'];
-    final isTemp = messageId.toString().startsWith('temp_');
+    final status = message['status'];
     final color = Colors.black.withOpacity(0.6);
-    
-    if (isTemp) {
-      return Text(
-        'Sending...',
-        style: TextStyle(
-          fontSize: 12,
-          color: color,
-          fontStyle: FontStyle.italic,
+
+    if (status == 'pending') {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.access_time, size: 12, color: Colors.grey),
+          const SizedBox(width: 4),
+          Text(
+            'Pending',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (status == 'sending') {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.grey),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            'Sending...',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (status == 'failed') {
+      return GestureDetector(
+        onTap: () => _messageQueue.retryMessage(messageId),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.error_outline, size: 12, color: Colors.red),
+            const SizedBox(width: 4),
+            Text(
+              'Failed · Tap to retry',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.red,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
         ),
       );
     }
 
-    // Check cache first for immediate response
+    if (status == 'failed_permanent') {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.error_outline, size: 12, color: Colors.red),
+          const SizedBox(width: 4),
+          Text(
+            'Failed to send',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.red,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (messageId.toString().startsWith('temp_')) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.access_time, size: 12, color: Colors.grey),
+          const SizedBox(width: 4),
+          Text(
+            'Pending',
+            style: TextStyle(
+              fontSize: 12,
+              color: Colors.grey,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+      );
+    }
+
     if (_messageReadStatusCache.containsKey(messageId)) {
       final readTime = _messageReadStatusCache[messageId];
       if (readTime != null) {
         return Text(
           _formatReadTime(readTime),
-          style: TextStyle(
-            fontSize: 12,
-            color: color,
-            fontStyle: FontStyle.italic,
-          ),
+          style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
         );
       } else {
         return Text(
           'Sent',
-          style: TextStyle(
-            fontSize: 12,
-            color: color,
-            fontStyle: FontStyle.italic,
-          ),
+          style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
         );
       }
     }
 
-    // For real messages, use FutureBuilder as fallback
     return FutureBuilder<DateTime?>(
       future: _getMessageReadTime(messageId, message['sender_id']),
       builder: (context, snapshot) {
-        // While loading, show "Sent"
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Text(
             'Sent',
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontStyle: FontStyle.italic,
-            ),
+            style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
           );
         }
-        
-        // If there's an error, show "Sent"
+
         if (snapshot.hasError) {
           return Text(
             'Sent',
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontStyle: FontStyle.italic,
-            ),
+            style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
           );
         }
 
@@ -223,20 +327,12 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
         if (readTime != null) {
           return Text(
             _formatReadTime(readTime),
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontStyle: FontStyle.italic,
-            ),
+            style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
           );
         } else {
           return Text(
             'Sent',
-            style: TextStyle(
-              fontSize: 12,
-              color: color,
-              fontStyle: FontStyle.italic,
-            ),
+            style: TextStyle(fontSize: 12, color: color, fontStyle: FontStyle.italic),
           );
         }
       },
@@ -393,26 +489,27 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
       messageData['content'] = '[Unable to decrypt]';
     }
 
-    if (messageData['sender_id'] == currentUserId) {
-      final tempMessageExists = _messages.any((msg) =>
-        msg['sender_id'] == currentUserId &&
-        msg['content'] == messageData['content'] &&
-        msg['id'].toString().startsWith('temp_')
-      );
+        if (messageData['sender_id'] == currentUserId) {
+      final clientMsgId = messageData['client_message_id'];
 
-      if (tempMessageExists) {
+      final existingIndex = _messages.indexWhere((msg) {
+        if (clientMsgId != null && msg['client_message_id'] == clientMsgId) {
+          return true;
+        }
+        if (msg['id'] == messageData['id']) {
+          return true;
+        }
+        return false;
+      });
+
+      if (existingIndex != -1) {
         setState(() {
-          final index = _messages.indexWhere((msg) =>
-            msg['sender_id'] == currentUserId &&
-            msg['content'] == messageData['content'] &&
-            msg['id'].toString().startsWith('temp_')
-          );
-          if (index != -1) {
-            _messages[index] = {
-              ...messageData,
-              'sender': _messages[index]['sender'],
-            };
-          }
+          _messages[existingIndex] = {
+            ...messageData,
+            'content': _messages[existingIndex]['content'],
+            'sender': _messages[existingIndex]['sender'],
+            'status': 'sent',
+          };
         });
         return;
       }
@@ -482,6 +579,20 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     if (mounted) {
       setState(() {
         _messages.removeWhere((msg) => msg['id'] == tempId);
+      });
+    }
+  }
+
+  void updateMessageStatus(String messageId, String status) {
+    if (mounted) {
+      setState(() {
+        final index = _messages.indexWhere((msg) => msg['id'] == messageId);
+        if (index != -1) {
+          _messages[index] = {
+            ..._messages[index],
+            'status': status,
+          };
+        }
       });
     }
   }

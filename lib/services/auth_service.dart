@@ -1,3 +1,4 @@
+import 'package:chat_app/services/local_storage_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/services/encryption_service.dart';
 
@@ -130,7 +131,6 @@ class AuthService {
 
       final hasServer = await _encryptionService.hasServerKeys(userId);
       if (!hasServer){
-        print("Upgrading old user to E2EE...");
         await _encryptionService.generateAndStoreKeys(
           userId: userId,
           password: password,
@@ -155,6 +155,7 @@ class AuthService {
 
   Future<void> signOut() async {
     await _encryptionService.clearLocalKeys();
+    await LocalStorageService().clearAll();
     await _supabase.auth.signOut();
   }
 

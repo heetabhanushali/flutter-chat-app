@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:chat_app/widgets/message_bubble.dart';
 import 'package:chat_app/widgets/chat_input.dart';
 import 'package:chat_app/services/ai_service.dart';
+import 'package:chat_app/services/connectivity_service.dart';
 
 class ChatBotPage extends StatefulWidget {
   const ChatBotPage({Key? key}) : super(key: key);
@@ -15,6 +16,7 @@ class _ChatBotPageState extends State<ChatBotPage> {
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
   final _aiService = AiService();
+  final _connectivity = ConnectivityService();
 
   @override
   void initState() {
@@ -29,6 +31,18 @@ class _ChatBotPageState extends State<ChatBotPage> {
 
   Future<void> _sendMessage(String message) async {
     if (message.trim().isEmpty) return;
+
+    if (!_connectivity.isOnline) {
+      setState(() {
+        _messages.add(ChatMessage(
+          text: "I'm unavailable while offline. Please try again when you're connected.",
+          isUser: false,
+          timestamp: DateTime.now(),
+        ));
+      });
+      _scrollToBottom();
+      return;
+    }
 
     setState(() {
       _messages.add(ChatMessage(

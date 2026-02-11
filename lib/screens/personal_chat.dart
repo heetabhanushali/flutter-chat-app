@@ -6,6 +6,7 @@ import 'package:chat_app/services/chat_service.dart';
 import 'package:chat_app/services/realtime_service.dart';
 import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
 final GlobalKey<ChatListState> chatListKey = GlobalKey<ChatListState>();
 
@@ -101,66 +102,77 @@ class _PersonalChatScreenState extends State<PersonalChatScreen> with WidgetsBin
     }
   }
 
-  Future<void> _sendMessage() async {
+    Future<void> _sendMessage() async {
     final messageText = _messageController.text.trim();
-    if (messageText.isEmpty || _isSending) return;
-
+    if (messageText.isEmpty) return;
     if (_chatService.currentUserId == null) return;
 
+    // Clear input immediately
     _messageController.clear();
-    setState(() {
-      _isSending = true;
-    });
 
-    // If no conversation exists, create one first WITHOUT rebuilding messages
+    // If no conversation exists, create one first (this blocks, but only once)
     if (_conversationId == null) {
+      setState(() { _isSending = true; });
+
       await _getOrCreateConversation();
-      if (_conversationId == null) {
-        setState(() {
-          _isSending = false;
-        });
-        return;
-      }
+
+      setState(() { _isSending = false; });
+
+      if (_conversationId == null) return;
 
       (_messagesKey.currentState as dynamic)?.setConversationId(_conversationId);
     }
 
+    // Generate unique IDs for this message
+    final clientMessageId = const Uuid().v4();
+    final tempId = 'temp_$clientMessageId';
+
     final tempMessage = {
-      'id': 'temp_${DateTime.now().millisecondsSinceEpoch}',
+      'id': tempId,
       'conversation_id': _conversationId,
       'sender_id': _chatService.currentUserId,
       'content': messageText,
       'created_at': DateTime.now().toUtc().toIso8601String(),
+      'client_message_id': clientMessageId,
+      'status': 'sending',
       'sender': {
         'username': 'You',
         'avatar_url': supabase.auth.currentUser?.userMetadata?['avatar_url'],
       },
     };
 
-    // Add optimistic message
+    // Show in UI immediately
     (_messagesKey.currentState as dynamic)?.addOptimisticMessage(tempMessage);
 
-    try {
-      await _chatService.sendMessage(
-        conversationId: _conversationId!,
-        content: messageText,
-      );
-    } catch (e) {
-      (_messagesKey.currentState as dynamic)?.removeOptimisticMessage(tempMessage['id']);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to send message: $e'),
-            backgroundColor: Colors.red,
-          ),
+    // Send in background — don't block UI
+    _chatService.sendMessage(
+      conversationId: _conversationId!,
+      content: messageText,
+      clientMessageId: clientMessageId,
+    ).then((result) {
+      if (!mounted) return;
+      final status = result['status'] ?? 'sent';
+      if (status == 'sent') {
+        // Online success — update temp with server data
+        (_messagesKey.currentState as dynamic)?.updateOptimisticMessage(
+          tempId,
+          {
+            ...result,
+            'content': messageText,
+            'sender': tempMessage['sender'],
+            'status': 'sent',
+            'client_message_id': clientMessageId,
+          },
         );
+      } else {
+        // Offline — queued. Update status to pending.
+        (_messagesKey.currentState as dynamic)?.updateMessageStatus(tempId, 'pending');
       }
-      _messageController.text = messageText;
-    } finally {
-      setState(() {
-        _isSending = false;
-      });
-    }
+    }).catchError((e) {
+      if (!mounted) return;
+      (_messagesKey.currentState as dynamic)?.updateMessageStatus(tempId, 'failed');
+    });
+    chatListKey.currentState?.loadConversations();
   }
 
   void _setupTypingSubscription() {

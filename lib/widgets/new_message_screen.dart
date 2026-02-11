@@ -1,6 +1,7 @@
 import 'package:chat_app/screens/personal_chat.dart';
 import 'package:flutter/material.dart';
 import 'package:chat_app/services/user_service.dart';
+import 'package:chat_app/services/connectivity_service.dart';
 
 class NewMessageScreen extends StatefulWidget {
   const NewMessageScreen({super.key});
@@ -17,6 +18,7 @@ class _NewMessageScreenState extends State<NewMessageScreen> {
 
   List<Map<String, dynamic>> _searchResults = [];
   bool _isSearching = false;
+  final _connectivity = ConnectivityService();
 
   @override
   void dispose() {
@@ -28,6 +30,14 @@ class _NewMessageScreenState extends State<NewMessageScreen> {
 
   Future<void> _searchUsers(String query) async {
     if (query.isEmpty) {
+      setState(() {
+        _searchResults = [];
+        _isSearching = false;
+      });
+      return;
+    }
+
+    if (!_connectivity.isOnline) {
       setState(() {
         _searchResults = [];
         _isSearching = false;
@@ -184,7 +194,28 @@ class _NewMessageScreenState extends State<NewMessageScreen> {
           // SEARCH RESULTS OR EMPTY STATE
           //------------------------------------------------------------
           Expanded(
-            child: _recipientController.text.isEmpty
+            child: !_connectivity.isOnline
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.wifi_off,
+                          size: 64,
+                          color: Colors.grey[400],
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Search unavailable offline',
+                          style: TextStyle(
+                            fontSize: 16,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                : _recipientController.text.isEmpty
                 ? Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -217,13 +248,17 @@ class _NewMessageScreenState extends State<NewMessageScreen> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 Icon(
-                                  Icons.person_search,
+                                  !_connectivity.isOnline
+                                    ? Icons.wifi_off
+                                    : Icons.person_search,
                                   size: 64,
                                   color: Colors.grey[400],
                                 ),
                                 const SizedBox(height: 16),
                                 Text(
-                                  'No users found',
+                                  !_connectivity.isOnline
+                                    ? 'Search unavailable offline'
+                                    : 'No users found',
                                   style: TextStyle(
                                     fontSize: 16,
                                     color: Colors.grey[600],

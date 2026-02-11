@@ -1,11 +1,26 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/services/encryption_service.dart';
+import 'package:chat_app/services/local_storage_service.dart';
+import 'package:chat_app/services/message_queue_service.dart';
+import 'package:chat_app/services/network_service.dart';
+import 'package:uuid/uuid.dart';
 
 class ChatService {
   final SupabaseClient _supabase = Supabase.instance.client;
   final EncryptionService _encryptionService = EncryptionService();
-
+  final LocalStorageService _localStorage = LocalStorageService();
+  final NetworkService _network = NetworkService();
+  final Uuid _uuid = const Uuid();
   String? get currentUserId => _supabase.auth.currentUser?.id;
+  bool _queueInitialized = false;
+
+  void initQueue() {
+    if (_queueInitialized) return;
+    _queueInitialized = true;
+    MessageQueueService().initialize(
+      sendFunction: sendMessageFromQueue,
+    );
+  }
 
   // ===============================================
   // Deletion
@@ -16,8 +31,11 @@ class ChatService {
       throw Exception('User not authenticated');
     }
 
+    if (!_network.isOnline){
+      throw Exception('Cannot delete conversation while offline');
+    }
+
     try {
-      // Remove any existing deletion record for this conversation
       await _supabase
           .from('user_deleted_conversations')
           .delete()
@@ -35,7 +53,6 @@ class ChatService {
             'deleted_at': deletionTime,
           });
 
-      // print("CONVERSATION IS DELETED / UPDATED");
       return true;
     } catch (e) {
       print('Error deleting conversation: $e');
@@ -45,6 +62,7 @@ class ChatService {
 
   Future<DateTime?> getConversationDeletionTime(String conversationId) async {
     if (currentUserId == null) return null;
+    if (!_network.isOnline) return null;
 
     try {
       final response = await _supabase
@@ -56,11 +74,14 @@ class ChatService {
 
       if (response != null) {
         return DateTime.parse(response['deleted_at']).toUtc();
-        // print("getConversationDeletiontime: ${deletedAt}");
       }
 
       return null;
     } catch (e) {
+      if (_network.isNetworkError(e)) {
+        _network.reportOffline();
+        return null;
+      }
       print('Error getting conversation deletion time: $e');
       return null;
     }
@@ -83,6 +104,7 @@ class ChatService {
       );
 
       final List<Map<String, dynamic>> result = [];
+      final List<Map<String, dynamic>> toCache = [];
 
       for (final conv in response) {
         // Decrypt last message
@@ -110,10 +132,39 @@ class ChatService {
           'updatedAt': conv['updated_at'],
           'isUnread': conv['is_unread'] ?? false,
         });
+
+        toCache.add({
+          'id': conv['conversation_id'],
+          'otherUserId': conv['other_user_id'],
+          'otherUsername': conv['other_user_username'],
+          'otherAvatarUrl': conv['other_user_avatar_url'],
+          'lastMessage': lastMessage,
+          'updatedAt': conv['updated_at'],
+          'isUnread': conv['is_unread'] ?? false,
+        });
       }
+
+      await _localStorage.saveConversations(toCache);
+      _network.reportOnline();
 
       return result;
     } catch (e) {
+      if (_network.isNetworkError(e)) {
+        _network.reportOffline();
+
+        final cached = _localStorage.getConversations();
+        return cached.map((conv) => {
+          'id': conv['id'],
+          'otherUser': {
+            'id': conv['otherUserId'],
+            'username': conv['otherUsername'],
+            'avatar_url': conv['otherAvatarUrl'],
+          },
+          'lastMessage': conv['lastMessage'],
+          'updatedAt': conv['updatedAt'],
+          'isUnread': conv['isUnread'] ?? false,
+        }).toList();
+      }
       print('Error loading conversations: $e');
       rethrow;
     }
@@ -139,9 +190,21 @@ class ChatService {
       if (conversationId != null && markAsRead) {
         await markAllMessagesAsRead(conversationId);
       }
-
+      _network.reportOnline();
       return conversationId;
     } catch (e) {
+      if (_network.isNetworkError(e)) {
+        _network.reportOffline();
+
+        // Try to find conversation ID from cached conversations
+        final cached = _localStorage.getConversations();
+        for (final conv in cached) {
+          if (conv['otherUserId'] == recipientId) {
+            return conv['id'];
+          }
+        }
+        return null;
+      }
       print('Error getting existing conversation: $e');
       rethrow;
     }
@@ -151,6 +214,8 @@ class ChatService {
     if (currentUserId == null) {
       throw Exception('User not authenticated');
     }
+
+    if (!_network.isOnline) return null;
 
     try {
       // Check for existing conversation first
@@ -197,14 +262,12 @@ class ChatService {
 
       final deletedAt = await getConversationDeletionTime(conversationId);
 
-      // Fetch all messages for the conversation
       final messages = await _supabase
           .from('messages')
           .select('*, sender:users!messages_sender_id_fkey(username, avatar_url)')
           .eq('conversation_id', conversationId)
           .order('created_at', ascending: true);
 
-      // Filter messages based on deletion time
       List<Map<String, dynamic>> filteredMessages;
       if (deletedAt != null) {
         filteredMessages = messages.where((msg) {
@@ -233,10 +296,38 @@ class ChatService {
           print('Failed to decrypt message ${msg['id']}: $e');
           msg['content'] = '[Unable to decrypt]';
         }
+        msg['status'] = 'sent';
       }
+
+      final messagesToCache = filteredMessages.map((msg) {
+        final cached = Map<String, dynamic>.from(msg);
+        cached['conversation_id'] = conversationId;
+        if (cached['sender'] is Map) {
+          cached['sender_username'] = cached['sender']['username'];
+          cached['sender_avatar'] = cached['sender']['avatar_url'];
+        }
+        return cached;
+      }).toList();
+      await _localStorage.saveMessages(conversationId, messagesToCache);
+      _network.reportOnline();
 
       return filteredMessages;
     } catch (e) {
+      if (_network.isNetworkError(e)) {
+        _network.reportOffline();
+
+        final cached = _localStorage.getMessages(conversationId);
+        return cached.map((msg) {
+          final message = Map<String, dynamic>.from(msg);
+          if (message['sender'] == null) {
+            message['sender'] = {
+              'username': message['sender_username'] ?? 'Unknown',
+              'avatar_url': message['sender_avatar'],
+            };
+          }
+          return message;
+        }).toList();
+      }
       print('Error loading messages: $e');
       rethrow;
     }
@@ -245,15 +336,19 @@ class ChatService {
   Future<Map<String, dynamic>> sendMessage({
     required String conversationId,
     required String content,
+    String? clientMessageId,
   }) async {
     if (currentUserId == null) {
       throw Exception('User not authenticated');
     }
+    initQueue();
+
+    final msgClientId = clientMessageId ?? _uuid.v4();
+    final now = DateTime.now().toUtc().toIso8601String();
+    final tempId = 'temp_$msgClientId';
 
     try {
-      final now = DateTime.now().toUtc().toIso8601String();
-
-      // Get recipient ID from conversation
+      // ------ ONLINE PATH ---------------------------------
       final conversation = await _supabase
           .from('conversations')
           .select('participant1_id, participant2_id')
@@ -264,7 +359,6 @@ class ChatService {
           ? conversation['participant2_id']
           : conversation['participant1_id'];
 
-      // Encrypt the message
       String messageToStore = content;
       String lastMessageToStore = content;
 
@@ -278,7 +372,6 @@ class ChatService {
         print('Encryption failed, sending unencrypted: $e');
       }
 
-      // Insert message
       final message = await _supabase.from('messages').insert({
         'conversation_id': conversationId,
         'sender_id': currentUserId,
@@ -286,17 +379,113 @@ class ChatService {
         'created_at': now,
       }).select().single();
 
-      // Update conversation's last message
       await _supabase.from('conversations').update({
         'last_message': lastMessageToStore,
         'updated_at': now,
       }).eq('id', conversationId);
 
-      return message;
+      _network.reportOnline();
+
+      return {
+        ...message,
+        'status': 'sent',
+        'client_message_id': msgClientId,
+      };
     } catch (e) {
+      // ---------- OFFLINE PATH ----------------
+      if (_network.isNetworkError(e)){
+        _network.reportOffline();
+
+        await MessageQueueService().addToQueue(
+          messageId: tempId,
+          conversationId: conversationId,
+          content: content,
+          senderId: currentUserId!,
+          clientMessageId: msgClientId,
+        );
+        await _localStorage.saveMessage({
+          'id': tempId,
+          'conversation_id': conversationId,
+          'sender_id': currentUserId,
+          'content': content,
+          'created_at': now,
+          'client_message_id': msgClientId,
+          'status': 'pending',
+        });
+        await _localStorage.updateConversationLastMessage(conversationId, content);
+        return {
+          'id': tempId,
+          'conversation_id': conversationId,
+          'sender_id': currentUserId,
+          'content': content,
+          'created_at': now,
+          'client_message_id': msgClientId,
+          'status': 'pending',
+        };
+      }
       print('Error sending message: $e');
       rethrow;
     }
+  }
+
+  Future<Map<String, dynamic>> sendMessageFromQueue({
+    required String conversationId,
+    required String content,
+    required String clientMessageId,
+  }) async {
+    if (currentUserId == null) {
+      throw Exception('User not authenticated');
+    }
+
+    final now = DateTime.now().toUtc().toIso8601String();
+
+    final existing = await _supabase
+        .from('messages')
+        .select()
+        .eq('client_message_id', clientMessageId)
+        .maybeSingle();
+
+    if (existing != null) {
+      return Map<String, dynamic>.from(existing);
+    }
+
+    final conversation = await _supabase
+        .from('conversations')
+        .select('participant1_id, participant2_id')
+        .eq('id', conversationId)
+        .single();
+
+    final recipientId = conversation['participant1_id'] == currentUserId
+        ? conversation['participant2_id']
+        : conversation['participant1_id'];
+
+    String messageToStore = content;
+    String lastMessageToStore = content;
+
+    try {
+      messageToStore = await _encryptionService.encryptMessage(
+        plainText: content,
+        otherUserId: recipientId,
+      );
+      lastMessageToStore = messageToStore;
+    } catch (e) {
+      print('Encryption failed, sending unencrypted: $e');
+    }
+
+    final message = await _supabase.from('messages').insert({
+      'conversation_id': conversationId,
+      'sender_id': currentUserId,
+      'content': messageToStore,
+      'created_at': now,
+      'client_message_id': clientMessageId,
+    }).select().single();
+
+    await _supabase.from('conversations').update({
+      'last_message': lastMessageToStore,
+      'updated_at': now,
+    }).eq('id', conversationId);
+
+    return message;
   }
 
   // ============================================================
@@ -305,6 +494,7 @@ class ChatService {
 
   Future<void> markConversationAsRead(String conversationId) async {
     if (currentUserId == null) return;
+    if (!_network.isOnline) return;
 
     try {
       // Get latest message in conversation
@@ -345,9 +535,8 @@ class ChatService {
 
   Future<void> markMessageAsRead(String messageId, String senderId) async {
     if (currentUserId == null) return;
-    
-    // Don't mark own messages as read
     if (senderId == currentUserId) return;
+    if (!_network.isOnline) return;
 
     try {
       // Check if already marked as read
@@ -368,6 +557,9 @@ class ChatService {
             });
       }
     } catch (e) {
+       if (e.toString().contains('23505') || e.toString().contains('duplicate key')) {
+        return;
+      }
       print('Error marking message as read: $e');
     }
   }
@@ -376,6 +568,7 @@ class ChatService {
   /// Marks all messages in a conversation as read by the current user
   Future<void> markAllMessagesAsRead(String conversationId) async {
     if (currentUserId == null) return;
+    if (!_network.isOnline) return;
 
     try {
       // Get all messages sent by the other user
@@ -387,7 +580,6 @@ class ChatService {
 
       if (unreadMessages.isEmpty) return;
 
-      // Check which messages are already marked as read
       final messageIds = unreadMessages.map((msg) => msg['id']).toList();
       final existingReadStatus = await _supabase
           .from('message_read_status')
@@ -399,7 +591,6 @@ class ChatService {
           .map((status) => status['message_id'])
           .toSet();
 
-      // Only insert read status for messages that aren't already marked as read
       final readStatusInserts = unreadMessages
           .where((msg) => !alreadyReadIds.contains(msg['id']))
           .map((msg) => {
@@ -412,15 +603,17 @@ class ChatService {
         await _supabase.from('message_read_status').insert(readStatusInserts);
       }
     } catch (e) {
+      if (e.toString().contains('23505') || e.toString().contains('duplicate key')) {
+        return;
+      }
       print('Error marking messages as read: $e');
     }
   }
 
   Future<DateTime?> getMessageReadTime(String messageId, String senderId, String recipientId) async {
     if (currentUserId == null) return null;
-
-    // Only check read status for messages I sent
     if (senderId != currentUserId) return null;
+    if (!_network.isOnline) return null;
 
     try {
       // Check if the recipient has read this message
@@ -433,11 +626,14 @@ class ChatService {
 
       if (readStatus != null) {
         return DateTime.parse(readStatus['read_at']).toLocal();
-        // print("message read at local time: ${localtime}");
       }
 
       return null;
     } catch (e) {
+      if (_network.isNetworkError(e)) {
+        _network.reportOffline();
+        return null;
+      }
       print('Error getting message read time: $e');
       return null;
     }

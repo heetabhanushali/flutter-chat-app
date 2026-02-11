@@ -6,6 +6,8 @@ import 'package:chat_app/widgets/conversation_tile.dart';
 import 'package:chat_app/models/models.dart';
 import 'package:chat_app/services/chat_service.dart';
 import 'package:chat_app/services/realtime_service.dart';
+import 'package:chat_app/services/connectivity_service.dart';
+import 'package:chat_app/services/message_queue_service.dart';
 
 
 class ChatList extends StatefulWidget {
@@ -23,6 +25,10 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   RealtimeChannel? _conversationsSubscription;
   final ChatService _chatService = ChatService();
   final RealtimeService _realtimeService = RealtimeService();
+  final ConnectivityService _connectivity = ConnectivityService();
+  final MessageQueueService _messageQueue = MessageQueueService();
+  StreamSubscription<bool>? _connectivitySub;
+  StreamSubscription<MessageStatusEvent>? _queueSub;
   final Map<String, bool> _typingUsers = {};
   final Map<String, Timer> _typingTimers = {};
   final Map<String, RealtimeChannel> _typingChannels = {};
@@ -32,6 +38,17 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initConversations();
+
+    _connectivitySub = _connectivity.onConnectivityChanged.listen((online) {
+      if (online && mounted) {
+        loadConversations();
+      }
+    });
+    _queueSub = _messageQueue.statusUpdates.listen((event) {
+      if (event.status == 'sent' && mounted) {
+        loadConversations();
+      }
+    });
   }
   
   @override
@@ -39,6 +56,8 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _conversationsSubscription?.unsubscribe();
     _cleanupTypingSubscriptions();
+    _connectivitySub?.cancel();
+    _queueSub?.cancel();
     super.dispose();
   }
 
@@ -62,11 +81,16 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
       if (!mounted) return;
 
       final newConversations = conversationsData.map((conv) {
+        final rawTime = conv['updatedAt']?.toString() ?? '';
+        final updatedAt = rawTime.endsWith('Z') || rawTime.contains('+')
+            ? DateTime.parse(rawTime)
+            : DateTime.parse(rawTime + 'Z');
+
         return ConversationWithUser(
           id: conv['id'],
           otherUser: UserProfile.fromJson(conv['otherUser']),
           lastMessage: conv['lastMessage'],
-          updatedAt: DateTime.parse(conv['updatedAt'] + 'Z'),
+          updatedAt: updatedAt,
           isUnread: conv['isUnread'],
         );
       }).toList();
@@ -82,8 +106,9 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
       print('Error loading conversations: $e');
       if (mounted) {
         setState(() {
-          error = e.toString();
+          // error = e.toString();
           isLoading = false;
+          error = null;
         });
       }
     }

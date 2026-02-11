@@ -1,8 +1,9 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:chat_app/services/connectivity_service.dart';
 
 class RealtimeService {
   final SupabaseClient _supabase = Supabase.instance.client;
-
+  final ConnectivityService _connectivity = ConnectivityService();
   String? get currentUserId => _supabase.auth.currentUser?.id;
 
   // ============================================================
@@ -97,7 +98,7 @@ class RealtimeService {
           },
         )
         .subscribe((status, error) {
-          if (error != null && onError != null) {
+          if (error != null && onError != null && _connectivity.isOnline) {
             onError(error.toString());
           }
         });
@@ -144,7 +145,7 @@ class RealtimeService {
           },
         )
         .subscribe((status, error) {
-          if (error != null) {
+          if (error != null && _connectivity.isOnline) {
             print('Read status subscription error: $error');
             if (onError != null) {
               onError(error.toString());
