@@ -4,6 +4,7 @@ import 'package:chat_app/services/local_storage_service.dart';
 import 'package:chat_app/services/message_queue_service.dart';
 import 'package:chat_app/services/network_service.dart';
 import 'package:uuid/uuid.dart';
+import 'package:chat_app/services/sync_service.dart';
 
 class ChatService {
   final SupabaseClient _supabase = Supabase.instance.client;
@@ -91,83 +92,30 @@ class ChatService {
   // CONVERSATION MANAGEMENT
   // ===============================================
 
-  /// Fetches all conversations for the current user using RPC
   Future<List<Map<String, dynamic>>> loadConversations() async {
     if (currentUserId == null) {
       throw Exception('User not authenticated');
     }
 
-    try {
-      final response = await _supabase.rpc(
-        'get_user_conversations',
-        params: {'p_user_id': currentUserId},
-      );
+    // 1. Read from Hive immediately
+    final cached = _localStorage.getConversations();
+    final result = cached.map((conv) => {
+      'id': conv['id'],
+      'otherUser': {
+        'id': conv['otherUserId'],
+        'username': conv['otherUsername'],
+        'avatar_url': conv['otherAvatarUrl'],
+      },
+      'lastMessage': conv['lastMessage'],
+      'updatedAt': conv['updatedAt'],
+      'isUnread': conv['isUnread'] ?? false,
+    }).toList();
 
-      final List<Map<String, dynamic>> result = [];
-      final List<Map<String, dynamic>> toCache = [];
+    // 2. Trigger background sync (non-blocking)
+    SyncService().requestSync();
 
-      for (final conv in response) {
-        // Decrypt last message
-        String lastMessage = conv['last_message'] ?? '';
-
-        if (lastMessage.isNotEmpty) {
-          try {
-            lastMessage = await _encryptionService.decryptMessage(
-              encryptedText: lastMessage,
-              otherUserId: conv['other_user_id'],
-            );
-          } catch (_) {
-            lastMessage = '[Encrypted Message]';
-          }
-        }
-
-        result.add({
-          'id': conv['conversation_id'],
-          'otherUser': {
-            'id': conv['other_user_id'],
-            'username': conv['other_user_username'],
-            'avatar_url': conv['other_user_avatar_url'],
-          },
-          'lastMessage': lastMessage,
-          'updatedAt': conv['updated_at'],
-          'isUnread': conv['is_unread'] ?? false,
-        });
-
-        toCache.add({
-          'id': conv['conversation_id'],
-          'otherUserId': conv['other_user_id'],
-          'otherUsername': conv['other_user_username'],
-          'otherAvatarUrl': conv['other_user_avatar_url'],
-          'lastMessage': lastMessage,
-          'updatedAt': conv['updated_at'],
-          'isUnread': conv['is_unread'] ?? false,
-        });
-      }
-
-      await _localStorage.saveConversations(toCache);
-      _network.reportOnline();
-
-      return result;
-    } catch (e) {
-      if (_network.isNetworkError(e)) {
-        _network.reportOffline();
-
-        final cached = _localStorage.getConversations();
-        return cached.map((conv) => {
-          'id': conv['id'],
-          'otherUser': {
-            'id': conv['otherUserId'],
-            'username': conv['otherUsername'],
-            'avatar_url': conv['otherAvatarUrl'],
-          },
-          'lastMessage': conv['lastMessage'],
-          'updatedAt': conv['updatedAt'],
-          'isUnread': conv['isUnread'] ?? false,
-        }).toList();
-      }
-      print('Error loading conversations: $e');
-      rethrow;
-    }
+    // 3. Return local data instantly
+    return result;
   }
 
   Future<String?> getExistingConversation(String recipientId, {bool markAsRead = false}) async {
@@ -249,88 +197,25 @@ class ChatService {
       throw Exception('User not authenticated');
     }
 
-    try {
-      final conversation = await _supabase
-          .from('conversations')
-          .select('participant1_id, participant2_id')
-          .eq('id', conversationId)
-          .single();
-
-      final recipientId = conversation['participant1_id'] == currentUserId
-          ? conversation['participant2_id']
-          : conversation['participant1_id'];
-
-      final deletedAt = await getConversationDeletionTime(conversationId);
-
-      final messages = await _supabase
-          .from('messages')
-          .select('*, sender:users!messages_sender_id_fkey(username, avatar_url)')
-          .eq('conversation_id', conversationId)
-          .order('created_at', ascending: true);
-
-      List<Map<String, dynamic>> filteredMessages;
-      if (deletedAt != null) {
-        filteredMessages = messages.where((msg) {
-          final rawTime = msg['created_at'];
-          DateTime msgTimeUtc;
-
-          if (rawTime.toString().endsWith('Z') || rawTime.toString().contains('+')) {
-            msgTimeUtc = DateTime.parse(rawTime);
-          } else {
-            msgTimeUtc = DateTime.parse(rawTime + 'Z').toUtc();
-          }
-
-          return msgTimeUtc.isAfter(deletedAt);
-        }).toList();
-      } else {
-        filteredMessages = List<Map<String, dynamic>>.from(messages);
+    // 1. Read from Hive immediately
+    final cached = _localStorage.getMessages(conversationId);
+    final messages = cached.map((msg) {
+      final message = Map<String, dynamic>.from(msg);
+      // Rebuild sender map if missing (cached messages store flat fields)
+      if (message['sender'] == null) {
+        message['sender'] = {
+          'username': message['sender_username'] ?? 'Unknown',
+          'avatar_url': message['sender_avatar'],
+        };
       }
+      return message;
+    }).toList();
 
-      for (var msg in filteredMessages) {
-        try {
-          msg['content'] = await _encryptionService.decryptMessage(
-            encryptedText: msg['content'],
-            otherUserId: recipientId,
-          );
-        } catch (e) {
-          print('Failed to decrypt message ${msg['id']}: $e');
-          msg['content'] = '[Unable to decrypt]';
-        }
-        msg['status'] = 'sent';
-      }
+    // 2. Trigger background sync (non-blocking)
+    SyncService().requestMessageSync(conversationId);
 
-      final messagesToCache = filteredMessages.map((msg) {
-        final cached = Map<String, dynamic>.from(msg);
-        cached['conversation_id'] = conversationId;
-        if (cached['sender'] is Map) {
-          cached['sender_username'] = cached['sender']['username'];
-          cached['sender_avatar'] = cached['sender']['avatar_url'];
-        }
-        return cached;
-      }).toList();
-      await _localStorage.saveMessages(conversationId, messagesToCache);
-      _network.reportOnline();
-
-      return filteredMessages;
-    } catch (e) {
-      if (_network.isNetworkError(e)) {
-        _network.reportOffline();
-
-        final cached = _localStorage.getMessages(conversationId);
-        return cached.map((msg) {
-          final message = Map<String, dynamic>.from(msg);
-          if (message['sender'] == null) {
-            message['sender'] = {
-              'username': message['sender_username'] ?? 'Unknown',
-              'avatar_url': message['sender_avatar'],
-            };
-          }
-          return message;
-        }).toList();
-      }
-      print('Error loading messages: $e');
-      rethrow;
-    }
+    // 3. Return local data instantly
+    return messages;
   }
 
   Future<Map<String, dynamic>> sendMessage({
@@ -347,85 +232,31 @@ class ChatService {
     final now = DateTime.now().toUtc().toIso8601String();
     final tempId = 'temp_$msgClientId';
 
-    try {
-      // ------ ONLINE PATH ---------------------------------
-      final conversation = await _supabase
-          .from('conversations')
-          .select('participant1_id, participant2_id')
-          .eq('id', conversationId)
-          .single();
+    // 1. Save to Hive immediately (always)
+    final localMessage = {
+      'id': tempId,
+      'conversation_id': conversationId,
+      'sender_id': currentUserId,
+      'content': content,
+      'created_at': now,
+      'client_message_id': msgClientId,
+      'status': 'pending',
+    };
 
-      final recipientId = conversation['participant1_id'] == currentUserId
-          ? conversation['participant2_id']
-          : conversation['participant1_id'];
+    await _localStorage.saveMessage(localMessage);
+    await _localStorage.updateConversationLastMessage(conversationId, content);
 
-      String messageToStore = content;
-      String lastMessageToStore = content;
+    // 2. Add to queue (MessageQueueService sends when online)
+    await MessageQueueService().addToQueue(
+      messageId: tempId,
+      conversationId: conversationId,
+      content: content,
+      senderId: currentUserId!,
+      clientMessageId: msgClientId,
+    );
 
-      try {
-        messageToStore = await _encryptionService.encryptMessage(
-          plainText: content,
-          otherUserId: recipientId,
-        );
-        lastMessageToStore = messageToStore;
-      } catch (e) {
-        print('Encryption failed, sending unencrypted: $e');
-      }
-
-      final message = await _supabase.from('messages').insert({
-        'conversation_id': conversationId,
-        'sender_id': currentUserId,
-        'content': messageToStore,
-        'created_at': now,
-      }).select().single();
-
-      await _supabase.from('conversations').update({
-        'last_message': lastMessageToStore,
-        'updated_at': now,
-      }).eq('id', conversationId);
-
-      _network.reportOnline();
-
-      return {
-        ...message,
-        'status': 'sent',
-        'client_message_id': msgClientId,
-      };
-    } catch (e) {
-      // ---------- OFFLINE PATH ----------------
-      if (_network.isNetworkError(e)){
-        _network.reportOffline();
-
-        await MessageQueueService().addToQueue(
-          messageId: tempId,
-          conversationId: conversationId,
-          content: content,
-          senderId: currentUserId!,
-          clientMessageId: msgClientId,
-        );
-        await _localStorage.saveMessage({
-          'id': tempId,
-          'conversation_id': conversationId,
-          'sender_id': currentUserId,
-          'content': content,
-          'created_at': now,
-          'client_message_id': msgClientId,
-          'status': 'pending',
-        });
-        await _localStorage.updateConversationLastMessage(conversationId, content);
-        return {
-          'id': tempId,
-          'conversation_id': conversationId,
-          'sender_id': currentUserId,
-          'content': content,
-          'created_at': now,
-          'client_message_id': msgClientId,
-          'status': 'pending',
-        };
-      }
-      print('Error sending message: $e');
-      rethrow;
-    }
+    // 3. Return immediately
+    return localMessage;
   }
 
   Future<Map<String, dynamic>> sendMessageFromQueue({

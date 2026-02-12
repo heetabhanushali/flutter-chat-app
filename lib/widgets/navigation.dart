@@ -5,6 +5,7 @@ import 'package:chat_app/services/connectivity_service.dart';
 import 'package:chat_app/services/chat_service.dart';
 import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:chat_app/services/sync_service.dart';
 
 class Navigation extends StatefulWidget {
   const Navigation({super.key});
@@ -33,7 +34,7 @@ class _NavigationState extends State<Navigation> {
     super.initState();
     _connectivity.startMonitoring();
     _chatService.initQueue();
-
+    SyncService().initialize();
     _connectivitySub = _connectivity.onConnectivityChanged.listen((online) {
       _isOffline = !online;
 

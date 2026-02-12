@@ -6,6 +6,8 @@ import 'package:chat_app/widgets/message_bubble.dart';
 import 'package:chat_app/services/realtime_service.dart';
 import 'package:chat_app/services/encryption_service.dart';
 import 'package:chat_app/services/message_queue_service.dart';
+import 'package:chat_app/services/sync_service.dart';
+import 'package:chat_app/services/local_storage_service.dart';
 import 'dart:async';
 
 final supabase = Supabase.instance.client;
@@ -43,6 +45,9 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
   final EncryptionService _encryptionService = EncryptionService();
   final MessageQueueService _messageQueue = MessageQueueService();
   StreamSubscription<MessageStatusEvent>? _queueStatusSub;
+  final SyncService _syncService = SyncService();
+  StreamSubscription<SyncEvent>? _syncSub;
+  final LocalStorageService _localStorage = LocalStorageService();
 
   @override
   void initState() {
@@ -51,6 +56,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     _loadMessages();
     _setupRealtimeSubscription();
     _listenToQueueStatus();
+    _listenToSyncUpdates();
   }
 
   @override
@@ -82,6 +88,7 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
     _realtimeService.unsubscribe(_messageSubscription);
     _realtimeService.unsubscribe(_readStatusSubscription);
     _queueStatusSub?.cancel();
+    _syncSub?.cancel();
     super.dispose();
   }
 
@@ -116,6 +123,62 @@ class _PersonalChatMessagesState extends State<PersonalChatMessages> {
           };
         }
       });
+    });
+  }
+
+  void _listenToSyncUpdates() {
+    _syncSub?.cancel();
+    _syncSub = _syncService.syncUpdates.listen((event) {
+      if (!mounted) return;
+
+      // Messages for this conversation were synced from server
+      if (event.type == SyncEventType.messagesUpdated &&
+          event.conversationId == _currentConversationId) {
+        _refreshFromLocal();
+      }
+
+      // A pending message was sent successfully by SyncService
+      if (event.type == SyncEventType.messageSent &&
+          event.conversationId == _currentConversationId &&
+          event.messageId != null) {
+        _refreshFromLocal();
+      }
+
+      // A message permanently failed via SyncService
+      if (event.type == SyncEventType.messageFailed &&
+          event.messageId != null) {
+        final index = _messages.indexWhere((msg) => msg['id'] == event.messageId);
+        if (index != -1) {
+          setState(() {
+            _messages[index] = {
+              ..._messages[index],
+              'status': 'failed_permanent',
+            };
+          });
+        }
+      }
+    });
+  }
+
+  /// Re-read messages from Hive and update UI
+  void _refreshFromLocal() {
+    if (!mounted) return;
+    if (_currentConversationId == null) return;
+
+    final cached = _localStorage.getMessages(_currentConversationId!);
+    final messages = cached.map((msg) {
+      final message = Map<String, dynamic>.from(msg);
+      if (message['sender'] == null) {
+        message['sender'] = {
+          'username': message['sender_username'] ?? 'Unknown',
+          'avatar_url': message['sender_avatar'],
+        };
+      }
+      return message;
+    }).toList();
+
+    setState(() {
+      _messages = messages;
     });
   }
 

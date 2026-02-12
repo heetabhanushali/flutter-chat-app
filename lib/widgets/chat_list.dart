@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:chat_app/services/local_storage_service.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:chat_app/screens/personal_chat.dart';
@@ -8,6 +9,7 @@ import 'package:chat_app/services/chat_service.dart';
 import 'package:chat_app/services/realtime_service.dart';
 import 'package:chat_app/services/connectivity_service.dart';
 import 'package:chat_app/services/message_queue_service.dart';
+import 'package:chat_app/services/sync_service.dart';
 
 
 class ChatList extends StatefulWidget {
@@ -32,6 +34,8 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
   final Map<String, bool> _typingUsers = {};
   final Map<String, Timer> _typingTimers = {};
   final Map<String, RealtimeChannel> _typingChannels = {};
+  final SyncService _syncService = SyncService();
+  StreamSubscription<SyncEvent>? _syncSub;
 
   @override
   void initState() {
@@ -44,13 +48,24 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
         loadConversations();
       }
     });
+
     _queueSub = _messageQueue.statusUpdates.listen((event) {
       if (event.status == 'sent' && mounted) {
         loadConversations();
       }
     });
+
+    _syncSub = _syncService.syncUpdates.listen((event) {
+      if (!mounted) return;
+      if (event.type == SyncEventType.conversationsUpdated) {
+        _refreshFromLocal();
+      }
+      if (event.type == SyncEventType.messageSent) {
+        _refreshFromLocal();
+      }
+    });
   }
-  
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -58,12 +73,45 @@ class ChatListState extends State<ChatList> with WidgetsBindingObserver {
     _cleanupTypingSubscriptions();
     _connectivitySub?.cancel();
     _queueSub?.cancel();
+    _syncSub?.cancel();
     super.dispose();
   }
 
   void _initConversations() async{
     await loadConversations();
     _setupRealtimeSubscription();
+  }
+
+  void _refreshFromLocal() {
+    if (!mounted) return;
+
+    final cached = LocalStorageService().getConversations();
+    final newConversations = cached.map((conv) {
+      final rawTime = conv['updatedAt']?.toString() ?? '';
+      final updatedAt = rawTime.endsWith('Z') || rawTime.contains('+')
+          ? DateTime.parse(rawTime)
+          : DateTime.parse('${rawTime}Z');
+
+      return ConversationWithUser(
+        id: conv['id'],
+        otherUser: UserProfile(
+          id: conv['otherUserId'] ?? '',
+          username: conv['otherUsername'] ?? 'Unknown',
+          avatarUrl: conv['otherAvatarUrl'],
+        ),
+        lastMessage: conv['lastMessage'],
+        updatedAt: updatedAt,
+        isUnread: conv['isUnread'] ?? false,
+      );
+    }).toList();
+
+    setState(() {
+      conversations = newConversations;
+      isLoading = false;
+      error = null;
+    });
+
+    _setupTypingSubscriptions();
   }
 
   @override
